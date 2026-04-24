@@ -1,0 +1,29 @@
+# 密钥
+.env
+
+# 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 运行时
+temp.txt
+temp.jpg
+*.csv
+*.txt
+!requirements.txt
+log
+browser_data
+venv
+
+# 允许 data 文件夹，但只保留 default_jobconfig.json
+!data/
+data/*
+!data/default_jobconfig.json
+
+# 系统
+.DS_Store
+.idea/
+.vscode/
+AI沟通截图/

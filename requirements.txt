@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+playwright
+langchain
+langchain-community
+dashscope
+python-dotenv
+pandas
+numpy
+requests
+beautifulsoup4
+lxml
+python-multipart
