@@ -1,2 +1,100 @@
 # job-finding-AI-Agent
-根据个人求职意向与简历，自动筛选、匹配合适岗位，持续贴合求职偏好优化推荐结果的AI agent。An AI-powered job matching agent that filters, matches, and refines job recommendations based on your resume and career preferences.
+一个基于 FastAPI 和通义千问 的多场景求职筛选与记忆助手，帮你高效管理不同方向的求职偏好，自动过滤岗位。
+
+# 当前已实现功能
+1. 多场景求职配置
+
+支持通过自然语言描述（如 “我刚毕业，想做AI方面工作，我会python，希望每个月1万以上”）创建独立的求职场景;
+
+每个场景拥有独立的配置：关键词、目标城市、薪资区间、个人要求;
+
+目前只支持猎聘噢，后续升级更多招聘平台.
+
+2. 岗位筛选与记忆
+
+基于求职场景配置的关键词、城市、薪资等规则，自动过滤不符合要求的岗位，避免过度爬虫和过度使用AI
+
+每个求职场景拥有独立的记忆库，记录：偏好 / 拒绝的岗位原因，个人偏好总结；支持后续接入 RAG 做偏好学习。
+
+
+# 启动方式一：本地运行
+1. 安装依赖
+pip install -r requirements.txt
+
+3. 进行配置（API Key等）
+打开config.py 在DASHSCOPE_API_KEY填入您个人的通义千问 API key
+
+3. 启动服务
+python main.py
+
+# 启动方式二：Docker 一键启动
+docker compose up -d
+
+# 介绍
+服务默认运行在 http://localhost:8000
+
+！不要过多使用本脚本,爬取招聘信息太多可能会被封号
+
+目前有四个接口：
+
+1./api/liepin_login 猎聘浏览器登录接口  
+
+2./api/start_from_txt 自然语言匹配求职场景 
+
+3./api/crawl_liepin 根据求职场景爬猎聘网岗位信息，结合AI输出岗位匹配度和AI建议是否投递（附带岗位链接）
+
+4./api/feedback 人工查看岗位并且对不适合的岗位说明理由以后，调用一次来更新记忆
+
+使用示例:
+1./api/liepin_login 猎聘浏览器登录接口
+
+curl -X POST "http://127.0.0.1:8000/api/liepin_login"
+
+会弹出浏览器，此时请在120秒内登录猎聘，登录好直接关闭标签页或者浏览器就行。
+
+登录以后可以看到的岗位数更多，并且可以识别该岗位您之前有没有聊过（如果已经聊过就不记录这个岗位了）。
+
+2./api/start_from_txt 自然语言匹配求职场景 
+
+把您的简历和求职期望文本一起写到D:/test_scene1.txt ，然后执行以下内容  
+
+curl -X POST "http://localhost:8000/api/start_from_txt" -H "Content-Type: application/json" -d "{\"file_path\": \"D:/test_scene1.txt\"}"
+
+接口会返回一个"scene_id"
+
+3./api/crawl_liepin 根据求职场景爬猎聘网岗位信息，结合AI输出岗位匹配度和AI建议是否投递（附带岗位链接）
+
+把您想查找工作的scene_id填入{您的scene_id}
+
+curl -X POST "http://127.0.0.1:8000/api/crawl_liepin?scene_id={您的scene_id}"
+
+浏览器会自动打开进行操作，不要关闭，操作完以后会自动关闭。
+
+如果手动关闭，会处理当前已获取到的岗位信息。
+
+接口会返回一个csv文件，这是已经过AI判断的岗位信息。一般在data目录下，后缀是scene_id编号
+
+4. /api/feedback 人工查看岗位并且对不适合的岗位说明理由以后，调用一次来更新记忆
+
+打开上一个接口返回的csv文件，可以人工投递这些岗位。
+
+在最右边新建一列"不合适理由"，用来记录“不合适，也不投递”的岗位原因。下次再检索到这条岗位会直接略过，AI也能学习您不喜欢这个岗位的原因。
+
+操作完成以后执行curl -X POST "http://127.0.0.1:8000/api/feedback?scene_id={您的scene_id}"
+
+会自动刷新记忆。完成以后原本的csv文件可以删掉，留着也行，不影响。留着的话下一次会追加写入。
+
+# 下个版本优化内容
+
+1.增加通义 Qwen-VL进行VLM 视觉解析
+
+2.提示词升级：现在对自然语言的分析还有点笨，应该是我提示词没写好
+
+3.RAG 智能偏好学习：当前记忆架构较基础而且有点蠢，后面会升级
+
+4.更多招聘平台支持
+
+5.目前整个流程不是很流畅，下次会优化得丝滑一点
+
+
+
