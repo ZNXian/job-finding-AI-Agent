@@ -20,7 +20,7 @@ from config import HOST,PORT,DEBUG
 app = FastAPI(title="job finding AI Agent", version="1.0")
 
 # ==========================
-# 猎聘登录接口
+# 接口 1：猎聘登录接口
 # ==========================
 @app.post("/api/liepin_login")
 @handle_api_exception
@@ -32,14 +32,12 @@ def liepin_login():
         "msg": "登录成功，已关闭浏览器"
     }
 # ==========================
-# 接口 0：自然语言匹配岗位场景
+# 接口 2：自然语言匹配岗位场景
 # ==========================
 @app.post("/api/start_from_txt")
 @handle_api_exception_async
-async def create_scene_from_txt(file: UploadFile = File(...)):
-    # 1. 保存临时txt
-    # 1. 保存临时文件 → 读取并清洗文本
-    user_text = read_and_clean_txt(file)
+async def create_scene_from_txt( file_path: str = Body(..., embed=True)):
+    user_text = read_and_clean_txt(file_path)
     # 2. 从 SceneManager 获取所有场景（内存读取，不读文件）
     scenes = scene_manager.get_all_scenes()
     # 3. 调用你已写好的 LLM 函数，判断是否新场景
@@ -54,7 +52,7 @@ async def create_scene_from_txt(file: UploadFile = File(...)):
     }
 
 # ==========================
-# 接口 1：爬取 + AI 判断 → 输出CSV
+# 接口 3：爬取 + AI 判断 → 输出CSV
 # ==========================
 @handle_api_exception
 @app.post("/api/crawl_liepin")
@@ -74,7 +72,7 @@ def run_crawl_and_ai(scene_id: int):  # 这里接收场景ID
     }
 
 # ==========================
-# 接口 2：人工反馈 → 更新记忆
+# 接口 4：人工反馈 → 更新记忆
 # # ==========================
 @app.post("/api/feedback")
 @handle_api_exception_async
