@@ -17,21 +17,57 @@
 每个求职场景拥有独立的记忆库，记录：偏好 / 拒绝的岗位原因，个人偏好总结；支持后续接入 RAG 做偏好学习。
 
 
-# 启动方式一：本地运行
-1. 安装依赖
+ 
+
+# windows 本地运行安装环境 
+
+在项目根目录执行（路径换成自己的克隆目录）：
+
+Windows（PowerShell）：
+
+cd D:\path\to\job-finding-AI-Agent
+
+python -m venv venv
+
+.\venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+
 pip install -r requirements.txt
 
-3. 进行配置（API Key等）
+python -m playwright install chromium
+
+# Linux / macOS： 本地运行安装环境 
+
+cd /path/to/job-finding-AI-Agent
+
+python3 -m venv venv
+
+source venv/bin/activate
+
+python -m pip install --upgrade pip
+
+pip install -r requirements.txt
+
+python -m playwright install chromium
+
+# 进行配置（API Key等）
+
 打开config.py 在DASHSCOPE_API_KEY填入您个人的通义千问 API key
 
-3. 启动服务
-python main.py
+# 启动服务
 
-# 启动方式二：Docker 一键启动
-docker compose up -d
+先验证安装
+
+python -c "import main; print('ok')"。
+
+python main.py （端口以 config.py 里的 HOST / PORT 为准。）
+
+uvicorn main:app --host 0.0.0.0 --port 8000
 
 # 介绍
-服务默认运行在 http://localhost:8000
+
+服务默认运行在 http://localhost:8000 （端口以 config.py 里的 HOST / PORT 为准。）
 
 ！不要过多使用本脚本,爬取招聘信息太多可能会被封号
 

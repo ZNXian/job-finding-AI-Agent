@@ -10,7 +10,7 @@ DEBUG = True
 # ========================== 筛选 / 动态配置 ==========================
 # 1. 大模型 API
 LLM_MODEL = "Tongyi"
-DASHSCOPE_API_KEY = "" #写入你的QWEN API_KEY
+DASHSCOPE_API_KEY = "sk-5e0e9d574ba44813a4624fa21563d535" #写入你的QWEN API_KEY
 
 
 # ========================== 人工复查记忆 输出 ==========================

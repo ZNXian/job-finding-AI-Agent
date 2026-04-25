@@ -5,7 +5,7 @@
 import os
 
 from langchain_community.llms import Tongyi
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from config import DASHSCOPE_API_KEY
 import config as cfg
 from config import log
