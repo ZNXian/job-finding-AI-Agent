@@ -4,7 +4,7 @@
 # ========================== 【配置文件：所有你能改的东西都在这】 ==========================
 
 # 1. 大模型 API
-DASHSCOPE_API_KEY = "sk-5e0e9d574ba44813a4624fa21563d535"
+DASHSCOPE_API_KEY = ""
 
 # 2. Chrome 用户目录（先关闭所有Chrome！）
 # CHROME_USER_DATA = r"C:\Users\xianz\AppData\Local\Google\Chrome\User Data"

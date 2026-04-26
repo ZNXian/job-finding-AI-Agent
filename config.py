@@ -10,7 +10,7 @@ DEBUG = True
 # ========================== 筛选 / 动态配置 ==========================
 # 1. 大模型 API
 LLM_MODEL = "Tongyi"
-DASHSCOPE_API_KEY = "sk-5e0e9d574ba44813a4624fa21563d535" #写入你的QWEN API_KEY
+DASHSCOPE_API_KEY = "" #写入你的QWEN API_KEY
 
 
 # ========================== 人工复查记忆 输出 ==========================
@@ -20,6 +20,8 @@ HISTORY_SCENE_PATH = str(_SCENE_DIR / "SCENE.json")
 SCENE_MAX_NUMBER=3 #最大场景数量
 # ========================== 搜索页面数,测试时控制爬虫量 ==========================
 MAX_PAGE = 1
+# 猎聘爬虫：True=无头后台运行（不显示浏览器窗口），False=显示窗口便于登录态与调试
+CRAWL_HEADLESS = False
 # ====================== 日志配置（全局唯一） ======================
 import logging
 

@@ -9,29 +9,32 @@ import urllib.parse
 import time
 import config as cfg
 from config import log
-from utils.browser import get_browser,wait_for_browser_close
+from utils.browser import BROWSER_USER_DATA_DIR, get_browser, wait_for_browser_close
 from utils.filter import *
 
 def login_liepin(timeout: int = 120):
-    """
-    """
-    wait_for_browser_close("https://www.liepin.com/", timeout)
+    """打开猎聘首页，使用与爬虫相同的用户目录，便于保存登录态。"""
+    wait_for_browser_close(
+        "https://www.liepin.com/",
+        timeout,
+        user_data_dir=BROWSER_USER_DATA_DIR,
+    )
     log.info("猎聘登录流程结束")
 
 
 def crawl_liepin():
     with sync_playwright() as p:
-        jobs =[]
-        browser = get_browser(p)
+        jobs = []
+        log.info("猎聘爬虫：无头模式（后台）" if cfg.CRAWL_HEADLESS else "猎聘爬虫：显示浏览器窗口")
+        browser = get_browser(p, headless=cfg.CRAWL_HEADLESS)
         page = browser.new_page()
         try:
-            jobs = _crawl_liepin(page)
+            jobs, browser = _crawl_liepin(p, browser, page)
         except Exception as e:
             error_msg = str(e).lower()
-            if any(kw in error_msg for kw in ['closed', 'detached', 'target', 'context']):
-                log.warning(f"浏览器已关闭，返回当前已收集的数据")
-                # 尝试从函数属性获取已收集的数据
-                if hasattr(_crawl_liepin, 'last_collected'):
+            if any(kw in error_msg for kw in ["closed", "detached", "target", "context"]):
+                log.warning("浏览器已关闭，返回当前已收集的数据")
+                if hasattr(_crawl_liepin, "last_collected"):
                     jobs = _crawl_liepin.last_collected
                     log.info(f"已返回 {len(jobs)} 个岗位")
                 else:
@@ -39,15 +42,46 @@ def crawl_liepin():
             else:
                 log.error(f"爬取失败: {e}")
                 jobs = []
-        try:
-            browser.close()
-        except:
-            pass
-        
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
         log.info(f"可处理岗位：{len(jobs)}")
         return jobs
 
-def _crawl_liepin(page ):
+def _is_liepin_login_page(page) -> bool:
+    """判断当前页是否为登录页（会话失效后详情链接常被重定向至此）。"""
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        return False
+    if any(x in url for x in ("login", "signin", "passport", "openlogin")):
+        return True
+    if "/account/" in url and any(x in url for x in ("login", "sign", "bind")):
+        return True
+    try:
+        snippet = page.evaluate(
+            "() => (document.body && document.body.innerText) ? document.body.innerText.slice(0, 800) : ''"
+        ) or ""
+    except Exception:
+        return False
+    markers = ("手机号登录", "验证码登录", "扫码登录", "密码登录", "短信登录")
+    if any(m in snippet for m in markers) and ("猎聘" in snippet or "liepin" in snippet.lower()):
+        return True
+    return False
+
+
+def _apply_detail_page_headers(page):
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    page.set_extra_http_headers({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://www.liepin.com/",
+    })
+
+
+def _crawl_liepin(p, browser, page):
     filter_pass_jobs = []
     encoded_key = urllib.parse.quote(cfg.SEARCH_KEYWORD)
     city ="410"
@@ -150,45 +184,77 @@ def _crawl_liepin(page ):
             break
 
     log.info(f"📊 猎聘列表页筛选完成，共 {len(filter_pass_jobs)} 个岗位通过硬筛选")
-    # 第二步：批量跳转详情页，校验「聊一聊/继续聊」
+    # 第二步：批量跳转详情页，校验「聊一聊/继续聊」；会话失效时唤起登录并最多恢复一次
     final_jobs = []
     if filter_pass_jobs:
         log.info(f"🚀 开始批量校验详情页（共 {len(filter_pass_jobs)} 个岗位）")
-        # 配置请求头，模拟正常访问
-        page.set_viewport_size({"width": 1920, "height": 1080})
-        page.set_extra_http_headers({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Referer": "https://www.liepin.com/"
-        })
-        for job in filter_pass_jobs:
-            try:
-                log.info(f"🔍 校验详情页：{job['标题']} | {job['链接']}")
-                # 跳转详情页（仅等待commit阶段，不等待完全加载）
-                page.goto(
-                    job["链接"],
-                    timeout=10000,
-                    wait_until="commit"
-                )
-                # 快速读取页面文本
-                page_text = page.evaluate("() => document.body.innerText")
+        _apply_detail_page_headers(page)
+        start_idx = 0
+        login_recovery_used = False
+        while start_idx < len(filter_pass_jobs):
+            relogin_retry = False
+            for idx in range(start_idx, len(filter_pass_jobs)):
+                job = filter_pass_jobs[idx]
+                try:
+                    log.info(f"🔍 校验详情页：{job['标题']} | {job['链接']}")
+                    page.goto(
+                        job["链接"],
+                        timeout=10000,
+                        wait_until="commit",
+                    )
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    except Exception:
+                        pass
+                    if _is_liepin_login_page(page):
+                        if not login_recovery_used:
+                            log.warning(
+                                "检测到详情页被重定向到登录页（可能因请求过多会话失效），"
+                                "将关闭当前浏览器并弹出窗口，请完成登录后关闭浏览器"
+                            )
+                            try:
+                                browser.close()
+                            except Exception:
+                                pass
+                            login_liepin()
+                            login_recovery_used = True
+                            browser = get_browser(p, headless=cfg.CRAWL_HEADLESS)
+                            page = browser.new_page()
+                            _apply_detail_page_headers(page)
+                            start_idx = idx
+                            relogin_retry = True
+                            break
+                        log.warning(
+                            "登录恢复后仍跳转到登录页，结束详情抓取，仅返回已收集的岗位"
+                        )
+                        _crawl_liepin.last_collected = final_jobs
+                        return final_jobs, browser
 
-                # 校验是否含「聊一聊/继续聊」
-                if not check_chatted(page_text):
-                    log.info(f"⚠️ 详情页含「继续聊」，排除岗位：{job['标题']}")
-                else:
-                    job['介绍'] =extract_job_description(page)
-                    final_jobs.append(job)
-                    log.info(f"✅ 详情页无「继续聊」，保留岗位：{job['标题']}，提取岗位介绍：{job['介绍'][:50]}...（已截取前300字）")
-                # 短暂等待，避免请求过快被风控
-                time.sleep(3)
-            except Exception as e:
-                log.error(f"❌ 详情页校验失败 {job['标题']}：{str(e)}")
+                    page_text = page.evaluate("() => document.body.innerText")
+
+                    if not check_chatted(page_text):
+                        log.info(f"⚠️ 详情页含「继续聊」，排除岗位：{job['标题']}")
+                    else:
+                        job["介绍"] = extract_job_description(page)
+                        final_jobs.append(job)
+                        intro_preview = (job["介绍"][:50] + "...") if len(job.get("介绍") or "") > 50 else job.get("介绍", "")
+                        log.info(
+                            f"✅ 详情页无「继续聊」，保留岗位：{job['标题']}，提取岗位介绍：{intro_preview}"
+                        )
+                    time.sleep(3)
+                except Exception as e:
+                    # todo  详情页校验失败原因需要测试
+                    log.error(f"❌ 详情页校验失败 {job['标题']}：{str(e)}")
+                    # continue
+                    break
+            if relogin_retry:
                 continue
-    
+            break
+
     # 在返回前保存到函数属性
     _crawl_liepin.last_collected = final_jobs  # 或 filter_pass_jobs
     log.info(f"✅ 猎聘最终有效岗位：{len(final_jobs)} 个")
-    return final_jobs
+    return final_jobs, browser
 
 def get_liepin_max_page(page):
     """
