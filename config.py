@@ -8,10 +8,27 @@ PORT = 8000
 DEBUG = True
 
 # ========================== 筛选 / 动态配置 ==========================
+LOGIN_USERNAME = "18142878012"
+LOGIN_PASSWORD = "Xzn172801!"
+# 猎聘 Playwright storage_state（由 scripts/liepin_login_save_state.py 写入；爬虫可加载复用登录态）
+_LIEPIN_BROWSER_DATA = Path(__file__).resolve().parent / "browser_data"
+LIEPIN_STORAGE_STATE_PATH = str(_LIEPIN_BROWSER_DATA / "liepin_storage_state.json")
+# 2Captcha（https://2captcha.com）API Key；猎聘登录：TencentTaskProxyless / CoordinatesTask
+captcha_api_key = "34a5e5965e6e0960ea06863a8fea3938"
+# 腾讯云验证码 appId（与 tcaptcha iframe URL 中 aid= 一致，如猎聘常见 2016659673）；留空则从 #tcaptcha_iframe[src] 解析
+TENCENT_CAPTCHA_APP_ID = ""
 # 1. 大模型 API
 LLM_MODEL = "Tongyi"
-DASHSCOPE_API_KEY = "" #写入你的QWEN API_KEY
-
+DASHSCOPE_API_KEY = "sk-5e0e9d574ba44813a4624fa21563d535" #写入你的QWEN API_KEY
+openai_API_KEY = "sk-cs73xq1HM0HkQnHNtjInLfs3UgQNWpCT0FCkrrZLJiegRGPz"  # 写入你的 OpenAI API Key（FAISS+SQLite 拒绝理由向量用）
+# AI 生成
+# 生成目的：与 services.job_store 中 OpenAI Embeddings 一致；更换模型后需清空 faiss_sqlite_data 或删库以免维度不一致
+OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
+# AI 生成
+# 生成目的：兼容网关的 base_url，须含 /v1，与提供商示例一致：
+#   client = OpenAI(api_key="本平台key", base_url="https://ai.nengyongai.cn/v1")
+# 留空字符串则走官方 https://api.openai.com/v1
+OPENAI_API_BASE = "https://ai.nengyongai.cn/v1"
 
 # ========================== 人工复查记忆 输出 ==========================
 _SCENE_DIR = Path(__file__).resolve().parent / "data"

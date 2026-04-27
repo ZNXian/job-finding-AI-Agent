@@ -15,6 +15,8 @@ temp.jpg
 !requirements.txt
 log
 browser_data
+faiss_sqlite_data
+job_store_verify_test
 venv
 
 # 允许 data 文件夹，但只保留 default_jobconfig.json
