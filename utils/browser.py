@@ -3,6 +3,7 @@
 # @Author : XZN
 
 # 浏览器相关工具
+import json
 import logging
 import time
 import functools
@@ -20,20 +21,33 @@ BROWSER_USER_DATA_DIR = "./browser_data"
 
 
 def get_browser(p, headless: bool = False, storage_state: str | None = None):
-    """获取持久化浏览器上下文（保持登录状态）。可选合并 Playwright storage_state JSON（如 liepin_login 写入）。"""
+    """获取持久化浏览器上下文（保持登录状态）。可选合并 Playwright storage_state JSON（如 liepin_login 写入）。
+
+    说明：多数 Playwright 版本下 ``launch_persistent_context`` 不支持 ``storage_state`` 参数，
+    因此在启动后读取 JSON 中的 ``cookies`` 并调用 ``context.add_cookies`` 合并（与官方导出格式一致）。
+    """
     kwargs: dict = {
         "user_data_dir": BROWSER_USER_DATA_DIR,
         "headless": headless,
         "slow_mo": 0 if headless else 500,
     }
-    if storage_state:
-        pth = Path(storage_state)
-        try:
-            if pth.is_file() and pth.stat().st_size > 0:
-                kwargs["storage_state"] = str(pth.resolve())
-        except OSError:
-            pass
-    return p.chromium.launch_persistent_context(**kwargs)
+    context = p.chromium.launch_persistent_context(**kwargs)
+    if not storage_state:
+        return context
+    pth = Path(storage_state)
+    try:
+        if not (pth.is_file() and pth.stat().st_size > 0):
+            return context
+        data = json.loads(pth.read_text(encoding="utf-8"))
+        cookies = data.get("cookies") or []
+        if not cookies:
+            return context
+        if not context.pages:
+            context.new_page()
+        context.add_cookies(cookies)
+    except Exception as e:
+        log.debug("合并 storage_state 中的 cookies 失败（可忽略）: %s", e)
+    return context
 
 def wait_for_browser_close(
     url: str,

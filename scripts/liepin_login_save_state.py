@@ -7,34 +7,28 @@
 # =============================================================================
 #
 # 零、总览
-#   - 每次调用先打一条 cfg.log.info「开始自动登录」（脱敏账号、路径、slider_wait_sec）。
-#   - 若 LIEPIN_STORAGE_STATE_PATH 对应文件「存在且非空」：先走「会话复用」分支；否则或复用失败后，走「完整登录」分支。
-#   - 复用失败、会话过期、JSON 损坏等不会抛死：关闭临时 context 后自动改为完整登录（见下「一」）。
+#   - 每次调用先打一条 cfg.log.info「开始自动登录」（脱敏账号、路径、slider_wait_sec、force_full_login）。
+#   - 步骤1：是否存在可读 storage_state → 无则匿名 context，有则带 storage 打开 https://www.liepin.com/ ；
+#     取页面上方正文片段，若不含「登录/注册」则视为已登录 → 刷新 storage_state 后安全 return。
+#   - 步骤2：若含「登录/注册」→ 沿用原账号密码、协议、登录按钮、腾讯云/滑块、落盘 storage_state 流程。
 #
-# 一、会话复用（仅当 _liepin_storage_state_path_ready(out) 为 True）
-#   - browser.new_context(storage_state=路径)，与完整登录共用 _liepin_browser_context_kwargs / _liepin_attach_init_scripts。
-#   - _liepin_attach_init_scripts：navigator.webdriver 隐藏 + TENCENT_SHOW_HIJACK_INIT_JS（utils.tencent_captcha）。
-#   - new_page → goto https://www.liepin.com/ domcontentloaded → install_tencent_show_hijack → sleep(1.2)。
-#   - _liepin_session_looks_logged_in(page)：等价于 not _still_on_chinese_account_password_login(page)。
-#       · _still_on… 为 True：URL 命中 passport/openlogin/signin 等，或首页横幅上「账号+密码+登录」三控件同时可见。
-#   - 若判定已登录：尽量 context.storage_state(path=…) 刷新文件；return (True, "已使用已有登录态…")；外层 finally 关闭 context。
-#   - 若判定未登录或 new_context/goto 抛错：cfg.log.info 或 debug 记录后，在 finally 中关闭 ctx_resume；继续执行「完整登录」。
+# 一、步骤1（与 _liepin_page_has_login_register_text 一致）
+#   - _liepin_attach_init_scripts → goto 首页 → install_tencent_show_hijack → sleep(1.2)。
+#   - 正文前约 4000 字内检索「登录/注册」（与爬虫列表未登录顶栏文案一致）。
 #
-# 二、完整登录（新建 context，不传 storage_state）
-#   - cfg.log.info「执行完整登录流程（新建浏览器上下文，不预载 storage_state）」。
-#   - 同样注入 init 脚本 → new_page → goto 首页 → install_tencent_show_hijack。
-#   - 步骤与 debug 前缀 [1/5]…[5/5] 对应：
+# 二、步骤2（表单登录，同一 BrowserContext / Page，不另起 context）
+#   - 步骤与 debug 前缀 [2/5]…[5/5] 对应：
 #       1）已在首页；2）点击「密码登录」（超时则视为已在密码表单）；3）填账号、密码；4）协议勾选兜底；
 #       5）点击 #home-banner-login-container .login-content form > button（文案含「登录」）。
 #
-# 三、验证码（仅完整登录分支，在点击「登录」之后）
+# 三、验证码（仅步骤2，在点击「登录」之后）
 #   - --slider-wait SEC > 0：在 SEC 秒内轮询直至 tencent_captcha_visible 或 slider_captcha_visible；否则 sleep(1)。
 #   - 若需腾讯云或极验之一且未配置 captcha_api_key：return False。
 #   - 腾讯云：solve_tencent_if_present（2Captcha TencentTaskProxyless；各 frame __captchaResolve/_aq_*；iframe 内
 #     parent.postMessage(JSON 字符串 type=3)）。细节见 utils/tencent_captcha.py。
 #   - 极验类滑块：solve_slider_if_present（CoordinatesTask），见 utils/slider_captcha.py。
 #
-# 四、完整登录成功判定与落盘
+# 四、步骤2 成功判定与落盘
 #   - wait_for_load_state("load")，sleep(2)；若 _still_on_chinese_account_password_login 仍为 True → 失败返回。
 #   - 否则 context.storage_state(path=…) 写入 LIEPIN_STORAGE_STATE_PATH；cfg.log.info「自动登录成功」；return True。
 #
@@ -43,7 +37,7 @@
 #     TENCENT_CAPTCHA_APP_ID（可选，留空由 tencent_captcha 从 iframe src 解析 aid）。
 #
 # 六、日志
-#   - INFO：开始自动登录；检测到已有 storage_state 尝试复用；沿用会话成功 / 将完整登录；完整登录开始；自动登录成功。
+#   - INFO：开始自动登录；步骤1 打开方式；已登录安全退出 / 检测到「登录/注册」进入步骤2；自动登录成功。
 #   - DEBUG：各步骤细节、[captcha/tencent] 等；根 logger 为 INFO 时默认不显示，排查时调至 DEBUG。
 #   - ERROR：腾讯云验证码未通过等。
 #
@@ -112,13 +106,24 @@ def _liepin_attach_init_scripts(context) -> None:
     context.add_init_script(TENCENT_SHOW_HIJACK_INIT_JS)
 
 
-def _liepin_session_looks_logged_in(page) -> bool:
+def _liepin_page_top_text_snippet(page, limit: int = 4000) -> str:
     # AI 生成
-    # 生成目的：首页上若仍表现为中文账号密码登录条（与 _still_on_chinese_account_password_login 一致）则视为未登录
+    # 生成目的：步骤1 取页面正文前若干字符，用于判断是否出现顶栏「登录/注册」
     try:
-        return not _still_on_chinese_account_password_login(page)
+        return (
+            page.evaluate(
+                "(lim) => { const b = document.body; "
+                "if (!b || !b.innerText) return ''; return b.innerText.slice(0, lim); }",
+                limit,
+            )
+            or ""
+        )
     except Exception:
-        return False
+        return ""
+
+
+def _liepin_page_has_login_register_text(page) -> bool:
+    return "登录/注册" in _liepin_page_top_text_snippet(page)
 
 
 def _still_on_chinese_account_password_login(page) -> bool:
@@ -161,24 +166,59 @@ def _still_on_chinese_account_password_login(page) -> bool:
     return False
 
 
+_CKID_COOKIE_NAMES = ("ckId", "ck_id")
+
+
+def _liepin_report_ckid_after_login(context) -> None:
+    # AI 生成
+    # 生成目的：登录成功后从 BrowserContext 读取 ckId / ck_id，便于联调与校验会话
+    try:
+        cookies = context.cookies()
+        ck_name = None
+        ck_val = None
+        for c in cookies:
+            n = c.get("name") or ""
+            if n in _CKID_COOKIE_NAMES:
+                ck_name = n
+                ck_val = c.get("value")
+                break
+        if ck_val:
+            print(f"获取到 {ck_name}: {ck_val}")
+            cfg.log.info("[liepin_login] 获取到 %s: %s", ck_name, ck_val)
+        else:
+            names = [c.get("name") for c in cookies if c.get("name")]
+            preview = ", ".join(sorted(set(names))[:40])
+            print("未找到 ckId / ck_id cookie")
+            cfg.log.warning(
+                "[liepin_login] 未找到 ckId / ck_id；当前 context 约 %s 个 cookie，name 抽样: %s",
+                len(cookies),
+                preview or "(无)",
+            )
+    except Exception as e:
+        cfg.log.debug("[liepin_login] 读取 ckId 时列举 cookies 失败: %s", e)
+
+
 def liepin_login(
     account: str,
     password: str,
     storage_state_path: str,
     *,
     slider_wait_sec: float = 0.0,
+    force_full_login: bool = False,
 ) -> tuple[bool, str]:
     """
     猎聘网自动登录（Playwright），成功后写入 storage_state JSON。
 
-    若 storage_state_path 指向的 JSON 已存在且非空，会先加载并访问首页校验会话；
-    仍有效则直接成功返回并刷新该文件；否则自动走完整账号密码与验证码流程（不因失效而异常退出）。
+    步骤1：按是否存在可读 storage_state 打开猎聘首页；若页面上方正文不含「登录/注册」则
+    视为已登录，刷新 storage_state 后安全返回。若含「登录/注册」则进入步骤2（账号密码与验证码），
+    成功后保存新的 storage_state。
 
     参数:
         account            登录账号（手机号/邮箱）
         password           登录密码
         storage_state_path Playwright context.storage_state 保存路径
         slider_wait_sec    点击「登录」后，最长等待滑块出现的秒数；>0 时轮询便于与 2Captcha 联调（默认 0 仅短暂检测）
+        force_full_login   为 True 时步骤1 始终不带 storage_state 打开（便于强制进入步骤2）
 
     返回:
         (success, message)
@@ -192,10 +232,11 @@ def liepin_login(
     out.parent.mkdir(parents=True, exist_ok=True)
     acc_masked = account[:3] + "****" if len(account) > 3 else "****"
     cfg.log.info(
-        "[liepin_login] 开始自动登录 account=%s storage_state_path=%s slider_wait_sec=%s",
+        "[liepin_login] 开始自动登录 account=%s storage_state_path=%s slider_wait_sec=%s force_full_login=%s",
         acc_masked,
         str(out),
         slider_wait_sec,
+        force_full_login,
     )
 
     try:
@@ -206,71 +247,53 @@ def liepin_login(
             )
             context = None
             state_str = str(out)
-            want_resume = _liepin_storage_state_path_ready(out)
-            try:
-                ctx_resume = None
-                if want_resume:
-                    cfg.log.info(
-                        "[liepin_login] 检测到已有 storage_state，尝试加载并校验会话 path=%s",
-                        state_str,
-                    )
-                    try:
-                        ctx_resume = browser.new_context(
-                            **_liepin_browser_context_kwargs(
-                                storage_state_path=state_str,
-                            ),
-                        )
-                        _liepin_attach_init_scripts(ctx_resume)
-                        pg = ctx_resume.new_page()
-                        pg.goto("https://www.liepin.com/", wait_until="domcontentloaded")
-                        install_tencent_show_hijack(pg)
-                        time.sleep(1.2)
-                        if _liepin_session_looks_logged_in(pg):
-                            try:
-                                ctx_resume.storage_state(path=state_str)
-                            except Exception as se:
-                                cfg.log.debug(
-                                    "[liepin_login] 沿用会话时刷新 storage_state 失败（可忽略）: %s",
-                                    se,
-                                )
-                            context = ctx_resume
-                            ctx_resume = None
-                            cfg.log.info(
-                                "[liepin_login] 沿用已有登录态（storage_state 仍有效），跳过表单登录 path=%s",
-                                state_str,
-                            )
-                            return (
-                                True,
-                                "已使用已有登录态（storage_state），无需重新填写表单",
-                            )
-                        cfg.log.info(
-                            "[liepin_login] storage_state 已失效或未登录，将执行完整登录 path=%s",
-                            state_str,
-                        )
-                    except Exception as e:
-                        cfg.log.debug(
-                            "[liepin_login] 加载或校验 storage_state 失败，将执行完整登录: %s",
-                            e,
-                            exc_info=True,
-                        )
-                    finally:
-                        if ctx_resume is not None:
-                            try:
-                                ctx_resume.close()
-                            except Exception:
-                                pass
-
-                context = browser.new_context(
-                    **_liepin_browser_context_kwargs(storage_state_path=None),
+            use_storage_step1 = (not force_full_login) and _liepin_storage_state_path_ready(out)
+            if force_full_login and _liepin_storage_state_path_ready(out):
+                cfg.log.info(
+                    "[liepin_login] force_full_login=True，步骤1 不按已有 storage 打开 path=%s",
+                    state_str,
                 )
+            try:
+                kw = _liepin_browser_context_kwargs(
+                    storage_state_path=state_str if use_storage_step1 else None,
+                )
+                context = browser.new_context(**kw)
                 _liepin_attach_init_scripts(context)
                 page = context.new_page()
+                cfg.log.info(
+                    "[liepin_login] 步骤1：打开猎聘首页 https://www.liepin.com/（%s）",
+                    "带 storage_state" if use_storage_step1 else "无 storage_state",
+                )
                 page.goto("https://www.liepin.com/", wait_until="domcontentloaded")
                 install_tencent_show_hijack(page)
-                cfg.log.info(
-                    "[liepin_login] 执行完整登录流程（新建浏览器上下文，不预载 storage_state）",
+                time.sleep(1.2)
+                top_preview = (
+                    (_liepin_page_top_text_snippet(page)[:240] or "").replace("\n", "\\n")
                 )
-                cfg.log.debug("[liepin_login] [1/5] 已打开猎聘网")
+                cfg.log.debug("[liepin_login] 步骤1：正文开头预览: %s…", top_preview[:200])
+
+                if not _liepin_page_has_login_register_text(page):
+                    cfg.log.info(
+                        "[liepin_login] 步骤1：页面上方正文不含「登录/注册」，判定已登录，"
+                        "安全退出并刷新 storage_state",
+                    )
+                    try:
+                        context.storage_state(path=state_str)
+                    except Exception as se:
+                        cfg.log.debug(
+                            "[liepin_login] 步骤1 刷新 storage_state 失败（可忽略）: %s",
+                            se,
+                        )
+                    _liepin_report_ckid_after_login(context)
+                    return (
+                        True,
+                        "步骤1：未检测到「登录/注册」，已在登录态；已刷新 storage_state（若可写）",
+                    )
+
+                cfg.log.info(
+                    "[liepin_login] 步骤1：检测到「登录/注册」，进入步骤2（账号密码与验证码）",
+                )
+                cfg.log.debug("[liepin_login] [步骤2/5] 已在猎聘网")
 
                 try:
                     password_login_el = page.locator("text=密码登录")
@@ -431,12 +454,27 @@ def liepin_login(
                         "请检查账号密码、滑块/验证码或风控",
                     )
 
+                try:
+                    cfg.log.debug(
+                        "[liepin_login] 登录成功后访问招聘列表页，便于业务侧 cookie（如 ckId）写入当前 context",
+                    )
+                    page.goto(
+                        "https://www.liepin.com/zhaopin/",
+                        wait_until="domcontentloaded",
+                        timeout=45000,
+                    )
+                    time.sleep(2)
+                except Exception as e:
+                    cfg.log.debug("[liepin_login] 登录后访问列表页（可忽略）: %s", e)
+
                 context.storage_state(path=str(out))
                 cfg.log.debug("[liepin_login] 已保存 storageState: %s", out)
                 cfg.log.info(
                     "[liepin_login] 自动登录成功，已写入 storage_state_path=%s",
                     str(out),
                 )
+                # 登录成功后（完整表单登录）
+                _liepin_report_ckid_after_login(context)
                 return True, "登录成功并已保存 storageState"
             finally:
                 if context is not None:
@@ -461,6 +499,11 @@ def main() -> int:
         metavar="SEC",
         help="点击登录后最长等待滑块出现的秒数（>0 用于与 2Captcha 滑块联调；需配置 captcha_api_key）",
     )
+    parser.add_argument(
+        "--full-login",
+        action="store_true",
+        help="步骤1 始终不带 storage_state 打开首页，从而强制进入步骤2（表单登录）",
+    )
     args = parser.parse_args()
 
     user = (getattr(cfg, "LOGIN_USERNAME", None) or "").strip()
@@ -469,7 +512,11 @@ def main() -> int:
         _ROOT / "browser_data" / "liepin_storage_state.json"
     )
     ok, msg = liepin_login(
-        user, pwd, path, slider_wait_sec=float(args.slider_wait or 0.0)
+        user,
+        pwd,
+        path,
+        slider_wait_sec=float(args.slider_wait or 0.0),
+        force_full_login=bool(args.full_login),
     )
     cfg.log.debug("[liepin_login] 结果: ok=%s msg=%s", ok, msg)
     return 0 if ok else 1

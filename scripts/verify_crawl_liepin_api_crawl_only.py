@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""验证 POST /api/crawl_liepin 在 crawl_only=true 时会调用 crawl_liepin，且不执行写 CSV / LLM。"""
+"""测试 POST /api/crawl_liepin：HTTP 路由 + crawl_only / reset_checkpoint 与 crawl_liepin 入参。"""
 from __future__ import annotations
 
 import os
@@ -13,12 +13,14 @@ os.chdir(_ROOT)
 
 
 def main() -> int:
+    from fastapi.testclient import TestClient
+
     import main as app_main
 
-    crawl_calls: list[int] = []
+    crawl_kwargs: list[dict] = []
 
-    def fake_crawl_liepin():
-        crawl_calls.append(1)
+    def fake_crawl_liepin(**kwargs):
+        crawl_kwargs.append(dict(kwargs))
         return [
             {
                 "平台": "猎聘",
@@ -32,26 +34,40 @@ def main() -> int:
             }
         ]
 
+    client = TestClient(app_main.app)
+
     with patch.object(app_main, "crawl_liepin", side_effect=fake_crawl_liepin) as m_crawl, patch.object(
         app_main, "write_to_csv"
     ) as m_csv, patch.object(app_main, "llm_process_job") as m_llm:
-        body = app_main.run_crawl_and_ai(scene_id=6, crawl_only=True)
+        r = client.post("/api/crawl_liepin?scene_id=6&crawl_only=true")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body.get("code") == 200, body
+        assert body.get("crawl_only") is True
+        assert body.get("job_count") == 1
+        assert body.get("scene_id") == 6
+        assert "jobs_preview" in body
+        assert len(crawl_kwargs) == 1
+        assert crawl_kwargs[0] == {"scene_id": 6, "reset_checkpoint": False}
+        m_crawl.assert_called_once()
+        m_csv.assert_not_called()
+        m_llm.assert_not_called()
 
-    assert body.get("code") == 200, body
-    assert body.get("crawl_only") is True
-    assert body.get("job_count") == 1
-    assert body.get("scene_id") == 6
-    assert "jobs_preview" in body
-    assert len(crawl_calls) == 1
-    m_crawl.assert_called_once()
-    m_csv.assert_not_called()
-    m_llm.assert_not_called()
+    crawl_kwargs.clear()
+    with patch.object(app_main, "crawl_liepin", side_effect=fake_crawl_liepin), patch.object(
+        app_main, "write_to_csv"
+    ), patch.object(app_main, "llm_process_job"):
+        r2 = client.post("/api/crawl_liepin?scene_id=6&crawl_only=false&reset_checkpoint=true")
+        assert r2.status_code == 200, r2.text
+        b2 = r2.json()
+        assert b2.get("crawl_only") is False
+        assert "csv_file" in b2
+        assert crawl_kwargs[0] == {"scene_id": 6, "reset_checkpoint": True}
 
-    print("OK: run_crawl_and_ai(scene_id=6, crawl_only=True) 调用了 crawl_liepin，且未调用 write_to_csv / llm_process_job")
-    print("真实爬取（列表+详情）在本机启动服务后执行：")
-    print(
-        '  curl -X POST "http://127.0.0.1:8000/api/crawl_liepin?scene_id=6&crawl_only=true"'
-    )
+    print("OK: POST /api/crawl_liepin")
+    print("  - crawl_only=true → 200, jobs_preview, crawl_liepin(scene_id=6, reset_checkpoint=False)")
+    print("  - reset_checkpoint=true → crawl_liepin(..., reset_checkpoint=True)")
+    print("真实爬取：启动服务后 curl -X POST \"http://127.0.0.1:8000/api/crawl_liepin?scene_id=6&crawl_only=true\"")
     return 0
 
 

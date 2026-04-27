@@ -35,11 +35,14 @@ _STORE_DIR_OVERRIDE: Optional[str] = None
 _conn: Optional[sqlite3.Connection] = None
 _lock = threading.RLock()
 
+# 各平台列表爬取快照库（与 pending/memory 的 jobs.db 分离）：{platform: sqlite3.Connection}
+_crawl_conns: Dict[str, sqlite3.Connection] = {}
+
 
 def set_job_store_dir(path: str | None) -> None:
     # AI 生成
     # 生成目的：切换 SQLite 文件所在根目录；传入 None 恢复默认 faiss_sqlite_data
-    global _STORE_DIR_OVERRIDE, _conn
+    global _STORE_DIR_OVERRIDE, _conn, _crawl_conns
     with _lock:
         _STORE_DIR_OVERRIDE = path
         if _conn is not None:
@@ -48,6 +51,12 @@ def set_job_store_dir(path: str | None) -> None:
             except Exception:
                 pass
             _conn = None
+        for _plat, c in list(_crawl_conns.items()):
+            try:
+                c.close()
+            except Exception:
+                pass
+        _crawl_conns.clear()
 
 
 def _store_dir() -> Path:
@@ -62,6 +71,113 @@ def _db_path() -> Path:
     # AI 生成
     # 生成目的：SQLite 单库路径
     return _store_dir() / "jobs.db"
+
+
+def _crawl_platform_db_filename(platform: str) -> str:
+    safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in (platform or "unknown").lower())
+    return f"crawl_{safe}.db"
+
+
+def _crawl_db_path(platform: str) -> Path:
+    return _store_dir() / _crawl_platform_db_filename(platform)
+
+
+def _get_crawl_conn(platform: str) -> sqlite3.Connection:
+    global _crawl_conns
+    key = (platform or "unknown").strip().lower() or "unknown"
+    with _lock:
+        if key not in _crawl_conns:
+            d = _store_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            p = _crawl_db_path(key)
+            c = sqlite3.connect(str(p), check_same_thread=False)
+            c.row_factory = sqlite3.Row
+            c.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS list_jobs (
+                    id TEXT PRIMARY KEY,
+                    scene_id INTEGER NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    company TEXT NOT NULL DEFAULT '',
+                    location TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    url TEXT NOT NULL DEFAULT '',
+                    fetch_timestamp TEXT NOT NULL DEFAULT ''
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_list_jobs_scene_url
+                    ON list_jobs(scene_id, url);
+                """
+            )
+            c.commit()
+            _crawl_conns[key] = c
+        return _crawl_conns[key]
+
+
+def crawl_list_row_id(scene_id: int, url: str) -> str:
+    """列表爬取行主键：同平台库内按 scene_id + url 唯一。"""
+    normalized = f"{int(scene_id)}\0{(url or '').strip()}"
+    return hashlib.md5(normalized.encode("utf-8")).hexdigest()
+
+
+def _job_dict_from_liepin_list(job_dict: Dict[str, Any]) -> Dict[str, str]:
+    title = str(job_dict.get("标题") or job_dict.get("title", "")).strip()
+    company = str(job_dict.get("公司") or job_dict.get("company", "")).strip()
+    location = str(job_dict.get("地点") or job_dict.get("location", "")).strip()
+    description = str(job_dict.get("介绍") or job_dict.get("description", "")).strip()
+    url = str(job_dict.get("链接") or job_dict.get("url", "")).strip()
+    ts = job_dict.get("fetch_timestamp")
+    if ts is None or str(ts).strip() == "":
+        ts = datetime.now(timezone.utc).isoformat()
+    fetch_timestamp = str(ts).strip()
+    return {
+        "title": title,
+        "company": company,
+        "location": location,
+        "description": description,
+        "url": url,
+        "fetch_timestamp": fetch_timestamp,
+    }
+
+
+def is_crawl_list_url_present(platform: str, scene_id: int, url: str) -> bool:
+    """某平台库 + 场景下是否已记录该列表页链接（用于跳过已爬岗位）。"""
+    u = (url or "").strip()
+    if not u:
+        return False
+    conn = _get_crawl_conn(platform)
+    with _lock:
+        row = conn.execute(
+            "SELECT 1 FROM list_jobs WHERE scene_id = ? AND url = ? LIMIT 1",
+            (int(scene_id), u),
+        ).fetchone()
+        return row is not None
+
+
+def upsert_crawl_list_job(platform: str, scene_id: int, job_dict: Dict[str, Any]) -> None:
+    """列表阶段硬校验通过后写入该平台库（字段与 pending 元数据一致 + scene_id）。"""
+    f = _job_dict_from_liepin_list(job_dict)
+    url = f["url"]
+    if not url:
+        return
+    jid = crawl_list_row_id(scene_id, url)
+    conn = _get_crawl_conn(platform)
+    with _lock:
+        conn.execute(
+            """INSERT OR REPLACE INTO list_jobs
+            (id, scene_id, title, company, location, description, url, fetch_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                jid,
+                int(scene_id),
+                f["title"],
+                f["company"],
+                f["location"],
+                f["description"],
+                f["url"],
+                f["fetch_timestamp"],
+            ),
+        )
+        conn.commit()
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -385,10 +501,22 @@ def get_similar_rejected_reasons(query_text: str, n: int = 3) -> List[Dict[str, 
 
 def reset_collections_for_tests() -> None:
     # AI 生成
-    # 生成目的：测试用清空两表
+    # 生成目的：测试用清空两表及各平台 crawl_*.db
+    global _crawl_conns
     conn = _get_conn()
     with _lock:
         conn.executescript(
             "DROP TABLE IF EXISTS pending_jobs; DROP TABLE IF EXISTS memory_jobs;"
         )
         _ensure_schema(conn)
+        for _plat, c in list(_crawl_conns.items()):
+            try:
+                c.close()
+            except Exception:
+                pass
+        _crawl_conns.clear()
+        try:
+            for p in _store_dir().glob("crawl_*.db"):
+                p.unlink(missing_ok=True)
+        except OSError:
+            pass

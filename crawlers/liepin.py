@@ -1,6 +1,7 @@
 # -*- coding:utf-8 -*-
 # @CreatTime : 2026 19:39
 # @Author : XZN
+import concurrent.futures
 import random
 import re
 import sys
@@ -13,6 +14,10 @@ from playwright.sync_api import Error, sync_playwright
 
 import config as cfg
 from config import log
+from services.job_store import (
+    is_crawl_list_url_present,
+    upsert_crawl_list_job,
+)
 from utils.browser import BROWSER_USER_DATA_DIR, get_browser, wait_for_browser_close
 from utils.crawl_checkpoint import (
     get_resume_list_page_index,
@@ -20,6 +25,30 @@ from utils.crawl_checkpoint import (
     set_scene_last_page,
 )
 from utils.filter import *
+
+LIEPIN_JOB_PLATFORM = "liepin"
+
+
+def _liepin_storage_state_path() -> Path:
+    # AI 生成
+    # 生成目的：与 liepin_login、config 共用同一 storage_state 文件路径
+    root = Path(__file__).resolve().parent.parent
+    raw = getattr(cfg, "LIEPIN_STORAGE_STATE_PATH", None) or str(
+        root / "browser_data" / "liepin_storage_state.json"
+    )
+    return Path(raw).expanduser().resolve()
+
+
+def _liepin_storage_state_for_launch() -> str | None:
+    # AI 生成
+    # 生成目的：存在非空 storage_state 文件时供 launch_persistent_context 合并，否则匿名打开
+    p = _liepin_storage_state_path()
+    try:
+        if p.is_file() and p.stat().st_size > 0:
+            return str(p)
+    except OSError:
+        pass
+    return None
 
 
 def login_liepin(timeout: int = 120):
@@ -42,7 +71,16 @@ def crawl_liepin(
     with sync_playwright() as p:
         jobs = []
         log.info("猎聘爬虫：无头模式（后台）" if cfg.CRAWL_HEADLESS else "猎聘爬虫：显示浏览器窗口")
-        browser = get_browser(p, headless=cfg.CRAWL_HEADLESS)
+        ss = _liepin_storage_state_for_launch()
+        if ss:
+            log.info("猎聘启动：检测到 storage_state，将合并打开持久化上下文 path=%s", ss)
+        else:
+            log.info("猎聘启动：无有效 storage_state 文件，匿名打开持久化上下文")
+        browser = get_browser(
+            p,
+            headless=cfg.CRAWL_HEADLESS,
+            storage_state=ss,
+        )
         page = browser.new_page()
         try:
             jobs, browser = _crawl_liepin(
@@ -69,6 +107,10 @@ def crawl_liepin(
                 jobs = []
         finally:
             try:
+                _liepin_safe_export_storage_state(browser)
+            except Exception:
+                pass
+            try:
                 browser.close()
             except Exception:
                 pass
@@ -79,14 +121,14 @@ def crawl_liepin(
 def _liepin_try_auto_relogin(p) -> tuple:
     # AI 生成
     # 生成目的：调用 scripts.liepin_login_save_state.liepin_login，并用新 storage_state 重启持久化浏览器
+    # liepin_login 内部使用独立 sync_playwright；若在 crawl_liepin 外层 with sync_playwright 同线程调用会嵌套失败，
+    # 故在单独线程中执行自动登录脚本（不修改 liepin_login_save_state 实现）。
     root = Path(__file__).resolve().parent.parent
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     from scripts.liepin_login_save_state import liepin_login
 
-    path = getattr(cfg, "LIEPIN_STORAGE_STATE_PATH", None) or str(
-        root / "browser_data" / "liepin_storage_state.json"
-    )
+    path = str(_liepin_storage_state_path())
     slider = float(getattr(cfg, "LIEPIN_LOGIN_SLIDER_WAIT_SEC", 45.0) or 45.0)
     user = (getattr(cfg, "LOGIN_USERNAME", None) or "").strip()
     pwd = (getattr(cfg, "LOGIN_PASSWORD", None) or "").strip()
@@ -96,7 +138,16 @@ def _liepin_try_auto_relogin(p) -> tuple:
     if not (getattr(cfg, "captcha_api_key", None) or "").strip():
         log.error("自动登录需配置 captcha_api_key（腾讯云/极验验证码）")
         return None, None
-    ok, msg = liepin_login(user, pwd, path, slider_wait_sec=slider)
+
+    def _run_liepin_login():
+        return liepin_login(user, pwd, path, slider_wait_sec=slider)
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            ok, msg = pool.submit(_run_liepin_login).result()
+    except Exception as e:
+        log.error("猎聘自动登录（独立线程）执行异常: %s", e)
+        return None, None
     if not ok:
         log.error("猎聘自动登录失败: %s", msg)
         return None, None
@@ -130,7 +181,11 @@ def _liepin_recover_list_login(
     browser, page = _liepin_try_auto_relogin(p)
     if browser is None:
         log.error("列表/卡片处理中自动登录失败，停止翻页")
-        browser = get_browser(p, headless=cfg.CRAWL_HEADLESS)
+        browser = get_browser(
+            p,
+            headless=cfg.CRAWL_HEADLESS,
+            storage_state=_liepin_storage_state_for_launch(),
+        )
         page = browser.new_page()
         return browser, page, login_recovery_used, False, False
     login_recovery_used = True
@@ -143,6 +198,10 @@ def _liepin_recover_list_login(
     if _is_liepin_login_page(page):
         log.error("登录恢复后列表仍为登录页，停止翻页")
         return browser, page, login_recovery_used, False, False
+    try:
+        _liepin_export_storage_state(browser)
+    except Exception:
+        pass
     return browser, page, login_recovery_used, True, True
 
 
@@ -163,7 +222,7 @@ def _liepin_verify_list_login_and_recover(
 # AI 生成
 # 生成目的：结合当前 URL 与页面正文片段识别猎聘登录页，供列表/卡片/详情等多处触发自动登录恢复时复用
 def _is_liepin_login_page(page) -> bool:
-    """判断当前页是否为登录页（会话失效后详情链接常被重定向至此）。"""
+    """判断当前页是否为登录页或未登录态（含列表首屏仅出现「登录/注册」入口的情况）。"""
     try:
         url = (page.url or "").lower()
     except Exception:
@@ -174,14 +233,43 @@ def _is_liepin_login_page(page) -> bool:
         return True
     try:
         snippet = page.evaluate(
-            "() => (document.body && document.body.innerText) ? document.body.innerText.slice(0, 800) : ''"
+            "() => (document.body && document.body.innerText) ? document.body.innerText.slice(0, 4000) : ''"
         ) or ""
     except Exception:
         return False
+    # 招聘列表/首页未登录：顶栏常见「登录/注册」，URL 仍可能为 zhaopin 而非 passport
+    if "登录/注册" in snippet:
+        return True
     markers = ("手机号登录", "验证码登录", "扫码登录", "密码登录", "短信登录")
     if any(m in snippet for m in markers) and ("猎聘" in snippet or "liepin" in snippet.lower()):
         return True
     return False
+
+
+def _liepin_export_storage_state(browser) -> None:
+    # AI 生成
+    # 生成目的：将当前持久化上下文的 cookies 等写入 LIEPIN_STORAGE_STATE_PATH（刷新或新建）
+    out = _liepin_storage_state_path()
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        browser.storage_state(path=str(out))
+        log.info("猎聘已刷新 storage_state: %s", out)
+    except Exception as e:
+        log.debug("猎聘刷新 storage_state 失败（可忽略）: %s", e)
+
+
+def _liepin_safe_export_storage_state(browser) -> None:
+    # AI 生成
+    # 生成目的：避免在未登录态下覆盖已有有效 JSON，仅在当前页不像登录页时落盘
+    try:
+        pages = list(browser.pages)
+        page = pages[0] if pages else None
+        if page is not None and _is_liepin_login_page(page):
+            log.info("猎聘跳过 storage_state 落盘：当前页仍判定为登录/未登录态")
+            return
+    except Exception:
+        pass
+    _liepin_export_storage_state(browser)
 
 
 # AI 生成
@@ -246,7 +334,11 @@ def _liepin_process_detail_batch(p, browser, page, login_recovery_used, jobs_bat
                         browser, page = _liepin_try_auto_relogin(p)
                         if browser is None:
                             log.error("详情页自动登录失败，结束详情抓取")
-                            browser = get_browser(p, headless=cfg.CRAWL_HEADLESS)
+                            browser = get_browser(
+                                p,
+                                headless=cfg.CRAWL_HEADLESS,
+                                storage_state=_liepin_storage_state_for_launch(),
+                            )
                             page = browser.new_page()
                             return browser, page, login_recovery_used, kept, True
                         login_recovery_used = True
@@ -295,6 +387,7 @@ def _crawl_liepin(
     maxpage_url = None
     login_recovery_used = False
     crawl_finished_normally = False
+    crawl_scene_id = int(scene_id) if scene_id is not None else 0
     while True: # 循环翻页：0 ~ maxpage
     # for current_page in range(0, min(maxpage_url,maxpage)):
         log.info(f"📄 猎聘正在抓取第 {current_page} 页")
@@ -371,6 +464,14 @@ def _crawl_liepin(
                 if not link:
                     item_idx += 1
                     continue  # 无链接跳过
+                if is_crawl_list_url_present(LIEPIN_JOB_PLATFORM, crawl_scene_id, link):
+                    log.info(
+                        "列表链接已在平台库 %s（scene_id=%s）中存在，跳过该岗位",
+                        LIEPIN_JOB_PLATFORM,
+                        crawl_scene_id,
+                    )
+                    item_idx += 1
+                    continue
                 # 提取岗位名称
                 title_tag = item.query_selector('.ellipsis-1')
                 title = title_tag.get_attribute("title") if title_tag else ""
@@ -431,7 +532,7 @@ def _crawl_liepin(
                 log.info(f"🔍 硬校验通过{title},{area},{salary}{link}")
 
                 # ====== 第四步：校验通过，收集本页待拉详情的岗位 ======
-                page_filter_pass_jobs.append({
+                list_job = {
                     "平台": "猎聘",
                     "标题": title,
                     "公司": company,
@@ -439,8 +540,13 @@ def _crawl_liepin(
                     "地点": area,
                     "工作年限": experience,
                     "链接": link,
-                    "介绍":""
-                })
+                    "介绍": "",
+                }
+                page_filter_pass_jobs.append(list_job)
+                try:
+                    upsert_crawl_list_job(LIEPIN_JOB_PLATFORM, crawl_scene_id, list_job)
+                except Exception as ex:
+                    log.warning("写入列表岗位快照失败（可继续爬取）: %s", ex)
                 log.info(f"✅ 公司 {company} 岗位 {title} 校验通过，加入本页待详情队列")
 
             except Exception as e:
