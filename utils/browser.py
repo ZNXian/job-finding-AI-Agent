@@ -13,17 +13,27 @@ from playwright.sync_api import sync_playwright,Error
 
 log = logging.getLogger(__name__)
 
+from pathlib import Path
+
 # 与猎聘爬虫共用，便于登录态与爬取上下文一致
 BROWSER_USER_DATA_DIR = "./browser_data"
 
 
-def get_browser(p, headless: bool = False):
-    """获取持久化浏览器上下文（保持登录状态）。"""
-    return p.chromium.launch_persistent_context(
-        user_data_dir=BROWSER_USER_DATA_DIR,
-        headless=headless,
-        slow_mo=0 if headless else 500,
-    )
+def get_browser(p, headless: bool = False, storage_state: str | None = None):
+    """获取持久化浏览器上下文（保持登录状态）。可选合并 Playwright storage_state JSON（如 liepin_login 写入）。"""
+    kwargs: dict = {
+        "user_data_dir": BROWSER_USER_DATA_DIR,
+        "headless": headless,
+        "slow_mo": 0 if headless else 500,
+    }
+    if storage_state:
+        pth = Path(storage_state)
+        try:
+            if pth.is_file() and pth.stat().st_size > 0:
+                kwargs["storage_state"] = str(pth.resolve())
+        except OSError:
+            pass
+    return p.chromium.launch_persistent_context(**kwargs)
 
 def wait_for_browser_close(
     url: str,

@@ -1,16 +1,26 @@
 # -*- coding:utf-8 -*-
 # @CreatTime : 2026 19:39
 # @Author : XZN
-import signal
+import random
+import re
 import sys
-from contextlib import contextmanager
-from playwright.sync_api import sync_playwright,Error
-import urllib.parse
 import time
+import urllib.parse
+from pathlib import Path
+from typing import Optional
+
+from playwright.sync_api import Error, sync_playwright
+
 import config as cfg
 from config import log
 from utils.browser import BROWSER_USER_DATA_DIR, get_browser, wait_for_browser_close
+from utils.crawl_checkpoint import (
+    get_resume_list_page_index,
+    remove_scene_checkpoint,
+    set_scene_last_page,
+)
 from utils.filter import *
+
 
 def login_liepin(timeout: int = 120):
     """打开猎聘首页，使用与爬虫相同的用户目录，便于保存登录态。"""
@@ -22,18 +32,33 @@ def login_liepin(timeout: int = 120):
     log.info("猎聘登录流程结束")
 
 
-def crawl_liepin():
+def crawl_liepin(
+    scene_id: Optional[int] = None,
+    reset_checkpoint: bool = False,
+):
+    start_page = 0
+    if scene_id is not None:
+        start_page = get_resume_list_page_index(scene_id, reset=reset_checkpoint)
     with sync_playwright() as p:
         jobs = []
         log.info("猎聘爬虫：无头模式（后台）" if cfg.CRAWL_HEADLESS else "猎聘爬虫：显示浏览器窗口")
         browser = get_browser(p, headless=cfg.CRAWL_HEADLESS)
         page = browser.new_page()
         try:
-            jobs, browser = _crawl_liepin(p, browser, page)
+            jobs, browser = _crawl_liepin(
+                p,
+                browser,
+                page,
+                scene_id=scene_id,
+                start_page=start_page,
+            )
         except Exception as e:
             error_msg = str(e).lower()
             if any(kw in error_msg for kw in ["closed", "detached", "target", "context"]):
-                log.warning("浏览器已关闭，返回当前已收集的数据")
+                if not getattr(cfg, "CRAWL_HEADLESS", True):
+                    log.warning("手动关闭浏览器，正常结束爬取（返回已收集岗位）")
+                else:
+                    log.warning("浏览器已关闭，返回当前已收集的数据")
                 if hasattr(_crawl_liepin, "last_collected"):
                     jobs = _crawl_liepin.last_collected
                     log.info(f"已返回 {len(jobs)} 个岗位")
@@ -51,6 +76,92 @@ def crawl_liepin():
         log.info(f"可处理岗位：{len(jobs)}")
         return jobs
 
+def _liepin_try_auto_relogin(p) -> tuple:
+    # AI 生成
+    # 生成目的：调用 scripts.liepin_login_save_state.liepin_login，并用新 storage_state 重启持久化浏览器
+    root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from scripts.liepin_login_save_state import liepin_login
+
+    path = getattr(cfg, "LIEPIN_STORAGE_STATE_PATH", None) or str(
+        root / "browser_data" / "liepin_storage_state.json"
+    )
+    slider = float(getattr(cfg, "LIEPIN_LOGIN_SLIDER_WAIT_SEC", 45.0) or 45.0)
+    user = (getattr(cfg, "LOGIN_USERNAME", None) or "").strip()
+    pwd = (getattr(cfg, "LOGIN_PASSWORD", None) or "").strip()
+    if not user or not pwd:
+        log.error("自动登录需配置 LOGIN_USERNAME / LOGIN_PASSWORD（.env 或 config）")
+        return None, None
+    if not (getattr(cfg, "captcha_api_key", None) or "").strip():
+        log.error("自动登录需配置 captcha_api_key（腾讯云/极验验证码）")
+        return None, None
+    ok, msg = liepin_login(user, pwd, path, slider_wait_sec=slider)
+    if not ok:
+        log.error("猎聘自动登录失败: %s", msg)
+        return None, None
+    log.info("猎聘自动登录成功: %s", msg)
+    nb = get_browser(
+        p,
+        headless=cfg.CRAWL_HEADLESS,
+        storage_state=path,
+    )
+    return nb, nb.new_page()
+
+
+# AI 生成
+# 生成目的：封装列表/翻页/卡片解析中的「检测登录页 → 最多一次自动登录 → 重开 list_url → 必要时通知调用方重新 query 岗位卡片」
+def _liepin_recover_list_login(
+    p, browser, page, login_recovery_used: bool, list_url: str
+):
+    """列表/卡片解析过程中若当前页为登录页，尝试一次自动登录并重新打开 list_url。
+    返回 (browser, page, login_recovery_used, ok_continue, refetch_items)。
+    refetch_items=True 表示已重新进入列表，调用方须重新 query_selector_all 岗位卡片。"""
+    if not _is_liepin_login_page(page):
+        return browser, page, login_recovery_used, True, False
+    if login_recovery_used:
+        log.error("列表/卡片处理中仍为登录页且已用过一次自动登录恢复，停止本页")
+        return browser, page, login_recovery_used, False, False
+    log.warning("列表/卡片处理中检测到登录态失效，启动自动登录流程…")
+    try:
+        browser.close()
+    except Exception:
+        pass
+    browser, page = _liepin_try_auto_relogin(p)
+    if browser is None:
+        log.error("列表/卡片处理中自动登录失败，停止翻页")
+        browser = get_browser(p, headless=cfg.CRAWL_HEADLESS)
+        page = browser.new_page()
+        return browser, page, login_recovery_used, False, False
+    login_recovery_used = True
+    try:
+        page.goto(list_url, timeout=60000)
+    except Exception as e:
+        log.info("登录恢复后列表 URL 访问失败：%s，停止翻页", e)
+        return browser, page, login_recovery_used, False, False
+    _liepin_random_nav_delay()
+    if _is_liepin_login_page(page):
+        log.error("登录恢复后列表仍为登录页，停止翻页")
+        return browser, page, login_recovery_used, False, False
+    return browser, page, login_recovery_used, True, True
+
+
+# AI 生成
+# 生成目的：列表上下文下任意时刻（含 page.goto 列表 URL 之后、或列表内异步重定向）统一先检验是否登录页再打日志，再调用 _liepin_recover_list_login 恢复
+def _liepin_verify_list_login_and_recover(
+    p, browser, page, login_recovery_used, list_url: str, context: str
+):
+    if _is_liepin_login_page(page):
+        try:
+            u = (page.url or "")[:200]
+        except Exception:
+            u = ""
+        log.warning("跳转/会话后登录页检验 [%s]：命中猎聘登录页，url=%s", context, u)
+    return _liepin_recover_list_login(p, browser, page, login_recovery_used, list_url)
+
+
+# AI 生成
+# 生成目的：结合当前 URL 与页面正文片段识别猎聘登录页，供列表/卡片/详情等多处触发自动登录恢复时复用
 def _is_liepin_login_page(page) -> bool:
     """判断当前页是否为登录页（会话失效后详情链接常被重定向至此）。"""
     try:
@@ -73,6 +184,8 @@ def _is_liepin_login_page(page) -> bool:
     return False
 
 
+# AI 生成
+# 生成目的：为详情页 goto 设置视口与 Referer/UA，降低异常跳转登录的概率，并在自动登录恢复后再次应用
 def _apply_detail_page_headers(page):
     page.set_viewport_size({"width": 1920, "height": 1080})
     page.set_extra_http_headers({
@@ -81,13 +194,107 @@ def _apply_detail_page_headers(page):
     })
 
 
-def _crawl_liepin(p, browser, page):
-    filter_pass_jobs = []
+# AI 生成
+# 生成目的：列表/详情等每次跳转前的随机等待 5–10 秒，满足反爬节奏（与翻页、详情链式切换一致）
+def _liepin_random_nav_delay():
+    d = random.uniform(5.0, 10.0)
+    log.info("页面切换随机等待 %.1f 秒（反爬节奏）", d)
+    time.sleep(d)
+
+
+# AI 生成
+# 生成目的：对单页硬校验通过的岗位批量打开详情；与列表阶段共用 login_recovery_used；每次 goto 前随机等待；失败时返回 crawl_stop 供上层立即 return
+def _liepin_process_detail_batch(p, browser, page, login_recovery_used, jobs_batch):
+    kept = []
+    if not jobs_batch:
+        return browser, page, login_recovery_used, kept, False
+    _apply_detail_page_headers(page)
+    start_idx = 0
+    while start_idx < len(jobs_batch):
+        relogin_retry = False
+        for idx in range(start_idx, len(jobs_batch)):
+            job = jobs_batch[idx]
+            try:
+                _liepin_random_nav_delay()
+                log.info(f"🔍 校验详情页：{job['标题']} | {job['链接']}")
+                page.goto(
+                    job["链接"],
+                    timeout=10000,
+                    wait_until="commit",
+                )
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+                # AI 生成
+                # 生成目的：详情 page.goto 并等待加载后，必须检验是否被重定向到登录页，再决定自动登录或继续解析正文
+                try:
+                    du = (page.url or "")[:200]
+                except Exception:
+                    du = ""
+                if _is_liepin_login_page(page):
+                    log.warning(
+                        "详情跳转后登录页检验：已重定向至登录页，将尝试自动登录 | %s | url=%s",
+                        job.get("标题", ""),
+                        du,
+                    )
+                    if not login_recovery_used:
+                        try:
+                            browser.close()
+                        except Exception:
+                            pass
+                        browser, page = _liepin_try_auto_relogin(p)
+                        if browser is None:
+                            log.error("详情页自动登录失败，结束详情抓取")
+                            browser = get_browser(p, headless=cfg.CRAWL_HEADLESS)
+                            page = browser.new_page()
+                            return browser, page, login_recovery_used, kept, True
+                        login_recovery_used = True
+                        _apply_detail_page_headers(page)
+                        start_idx = idx
+                        relogin_retry = True
+                        break
+                    log.warning(
+                        "登录恢复后仍跳转到登录页，结束详情抓取，仅返回已收集的岗位"
+                    )
+                    return browser, page, login_recovery_used, kept, True
+
+                page_text = page.evaluate("() => document.body.innerText")
+
+                if not check_chatted(page_text):
+                    log.info(f"⚠️ 详情页含「继续聊」，排除岗位：{job['标题']}")
+                else:
+                    job["介绍"] = extract_job_description(page)
+                    kept.append(job)
+                    intro_preview = (job["介绍"][:50] + "...") if len(job.get("介绍") or "") > 50 else job.get("介绍", "")
+                    log.info(
+                        f"✅ 详情页无「继续聊」，保留岗位：{job['标题']}，提取岗位介绍：{intro_preview}"
+                    )
+            except Exception as e:
+                log.error(f"❌ 详情页校验失败 {job['标题']}：{str(e)}")
+                break
+        if relogin_retry:
+            continue
+        break
+    return browser, page, login_recovery_used, kept, False
+
+
+def _crawl_liepin(
+    p,
+    browser,
+    page,
+    scene_id: Optional[int] = None,
+    start_page: int = 0,
+):
+    final_jobs = []
     encoded_key = urllib.parse.quote(cfg.SEARCH_KEYWORD)
     city ="410"
     salaryCode = str(int(cfg.MIN_SALARY *12 *0.1))+"$" +str(int(cfg.MAX_SALARY *14*0.1))
     # salaryCode = ""
-    current_page=0
+    current_page = max(0, int(start_page))
+    maxpage_url = None
+    login_recovery_used = False
+    crawl_finished_normally = False
     while True: # 循环翻页：0 ~ maxpage
     # for current_page in range(0, min(maxpage_url,maxpage)):
         log.info(f"📄 猎聘正在抓取第 {current_page} 页")
@@ -95,35 +302,74 @@ def _crawl_liepin(p, browser, page):
         url = f"https://www.liepin.com/zhaopin/?city={city}&dq={city}&pubTime=30&currentPage={current_page}&pageSize=40&key={encoded_key}&salaryCode={salaryCode}"
         try:
             page.goto(url, timeout=60000)
-            time.sleep(5)  # 等待列表页加载完成
         except Exception as e:
             log.info(f"❌ 第 {current_page} 页访问失败：{e}，停止翻页")
             break
-        if current_page==0:#先进入第一页获取最大页数
+        # AI 生成
+        # 生成目的：列表 page.goto 之后必须检验是否重定向登录页，再走自动登录并重开当前列表页
+        browser, page, login_recovery_used, ok, _ = _liepin_verify_list_login_and_recover(
+            p, browser, page, login_recovery_used, url, context="列表页.goto(url)后"
+        )
+        if not ok:
+            break
+        _liepin_random_nav_delay()
+        if maxpage_url is None:
             maxpage_url = get_liepin_max_page(page)
             log.info(f"最大页数{maxpage_url}")
         # 1. 定位岗位列表容器
         job_list_box = page.query_selector(".job-list-box")
         if not job_list_box:
             log.info(f"⚠️ 第 {current_page} 页未找到岗位列表，结束抓取")
+            crawl_finished_normally = True
             break
 
         # 2. 定位每个岗位卡片
         items = job_list_box.query_selector_all(".job-card-pc-container")
         if len(items) == 0:
-            log.info(f"⚠️ 第 {current_page} 页无岗位，结束抓取")
+            log.info(f"⚠️ 第 {current_page} 页无岗位卡片，正常结束抓取")
+            crawl_finished_normally = True
             break
 
         log.info(f"🔍 第 {current_page} 页找到 {len(items)} 个岗位卡片")
 
-        # 3. 逐个处理岗位（先跳详情页校验「继续聊」）
-        for item in items:
+        page_filter_pass_jobs = []
+
+        # AI 生成
+        # 生成目的：遍历卡片时会话可能中途失效；自动登录后原 ElementHandle 失效，故用 item_idx + while + refetch 重拉 items，失败则 break_pagination 退出翻页
+        # 3. 逐个处理岗位（会话可能在遍历卡片时失效，需检测登录页并刷新 items）
+        item_idx = 0
+        break_pagination = False
+        while item_idx < len(items):
+            # AI 生成
+            # 生成目的：每轮卡片处理前检验当前页是否已变为登录页（含异步重定向），再按需恢复列表会话
+            browser, page, login_recovery_used, ok, refetch = _liepin_verify_list_login_and_recover(
+                p, browser, page, login_recovery_used, url, context="列表卡片循环.每轮开头"
+            )
+            if not ok:
+                break_pagination = True
+                break
+            if refetch:
+                job_list_box = page.query_selector(".job-list-box")
+                if not job_list_box:
+                    log.info("⚠️ 登录恢复后未找到岗位列表，结束抓取")
+                    break_pagination = True
+                    break
+                items = job_list_box.query_selector_all(".job-card-pc-container")
+                if not items:
+                    log.info("⚠️ 登录恢复后本页无岗位，结束抓取")
+                    break_pagination = True
+                    break
+                item_idx = min(item_idx, len(items) - 1)
+                continue
+
+            item = items[item_idx]
             try:
                 # ====== 第一步：提取列表页基础信息 ======
                 # 提取岗位详情链接
                 job_link_tag = item.query_selector('a[data-nick="job-detail-job-info"]')
                 link = job_link_tag.get_attribute("href") if job_link_tag else ""
                 if not link:
+                    item_idx += 1
                     continue  # 无链接跳过
                 # 提取岗位名称
                 title_tag = item.query_selector('.ellipsis-1')
@@ -155,14 +401,37 @@ def _crawl_liepin(p, browser, page):
                     if company_container:
                         company_tag2 = company_container.query_selector(".ellipsis-1")
                         company = company_tag2.inner_text().strip() if company_tag2 else ""
-                # ====== 第二步：硬校验 ======
+                # ====== 第二步：硬校验（DOM 拉取后也可能已被重定向到登录页）======
+                # AI 生成
+                # 生成目的：字段从列表 DOM 读完后、硬校验前再次检验是否登录页（与列表 goto 后检验同一套列表恢复逻辑），避免登录页 DOM 被误判为硬校验失败
+                browser, page, login_recovery_used, ok, refetch = _liepin_verify_list_login_and_recover(
+                    p, browser, page, login_recovery_used, url, context="列表卡片.硬校验前"
+                )
+                if not ok:
+                    break_pagination = True
+                    break
+                if refetch:
+                    job_list_box = page.query_selector(".job-list-box")
+                    if not job_list_box:
+                        log.info("⚠️ 硬校验前登录恢复后未找到岗位列表，结束抓取")
+                        break_pagination = True
+                        break
+                    items = job_list_box.query_selector_all(".job-card-pc-container")
+                    if not items:
+                        log.info("⚠️ 硬校验前登录恢复后本页无岗位，结束抓取")
+                        break_pagination = True
+                        break
+                    item_idx = min(item_idx, len(items) - 1)
+                    continue
+
                 if not hard_filter(title ,area,salary):
                     log.info(f"🔍 硬校验失败{title},{area},{salary}{link}")
+                    item_idx += 1
                     continue
                 log.info(f"🔍 硬校验通过{title},{area},{salary}{link}")
 
-                # ====== 第四步：校验通过，收集岗位信息 ======
-                filter_pass_jobs.append({
+                # ====== 第四步：校验通过，收集本页待拉详情的岗位 ======
+                page_filter_pass_jobs.append({
                     "平台": "猎聘",
                     "标题": title,
                     "公司": company,
@@ -172,87 +441,54 @@ def _crawl_liepin(p, browser, page):
                     "链接": link,
                     "介绍":""
                 })
-                log.info(f"✅ 公司 {company} 岗位 {title} 校验通过，加入列表")
+                log.info(f"✅ 公司 {company} 岗位 {title} 校验通过，加入本页待详情队列")
 
-            #
             except Exception as e:
                 log.debug(f"岗位处理失败: {e}")
                 # 出错后回到列表页，避免卡住
                 time.sleep(2)
-        current_page +=1
-        if current_page>= min(cfg.MAX_PAGE,maxpage_url):
+            item_idx += 1
+
+        # AI 生成
+        # 生成目的：列表卡片阶段登录恢复失败或中止时，跳出外层翻页循环，避免在无有效列表态下继续下一页
+        if break_pagination:
             break
 
-    log.info(f"📊 猎聘列表页筛选完成，共 {len(filter_pass_jobs)} 个岗位通过硬筛选")
-    # 第二步：批量跳转详情页，校验「聊一聊/继续聊」；会话失效时唤起登录并最多恢复一次
-    final_jobs = []
-    if filter_pass_jobs:
-        log.info(f"🚀 开始批量校验详情页（共 {len(filter_pass_jobs)} 个岗位）")
-        _apply_detail_page_headers(page)
-        start_idx = 0
-        login_recovery_used = False
-        while start_idx < len(filter_pass_jobs):
-            relogin_retry = False
-            for idx in range(start_idx, len(filter_pass_jobs)):
-                job = filter_pass_jobs[idx]
-                try:
-                    log.info(f"🔍 校验详情页：{job['标题']} | {job['链接']}")
-                    page.goto(
-                        job["链接"],
-                        timeout=10000,
-                        wait_until="commit",
-                    )
-                    try:
-                        page.wait_for_load_state("domcontentloaded", timeout=15000)
-                    except Exception:
-                        pass
-                    if _is_liepin_login_page(page):
-                        if not login_recovery_used:
-                            log.warning(
-                                "检测到详情页被重定向到登录页（可能因请求过多会话失效），"
-                                "将关闭当前浏览器并弹出窗口，请完成登录后关闭浏览器"
-                            )
-                            try:
-                                browser.close()
-                            except Exception:
-                                pass
-                            login_liepin()
-                            login_recovery_used = True
-                            browser = get_browser(p, headless=cfg.CRAWL_HEADLESS)
-                            page = browser.new_page()
-                            _apply_detail_page_headers(page)
-                            start_idx = idx
-                            relogin_retry = True
-                            break
-                        log.warning(
-                            "登录恢复后仍跳转到登录页，结束详情抓取，仅返回已收集的岗位"
-                        )
-                        _crawl_liepin.last_collected = final_jobs
-                        return final_jobs, browser
+        # AI 生成
+        # 生成目的：每爬完一页列表并硬筛选后，立即跳转该页全部通过岗位的详情（再翻下一页列表）；与列表共用 login_recovery_used
+        if page_filter_pass_jobs:
+            log.info(
+                "🚀 第 %s 页硬校验通过 %s 个岗位，开始本页详情批量校验",
+                current_page,
+                len(page_filter_pass_jobs),
+            )
+            browser, page, login_recovery_used, batch_kept, crawl_stop = (
+                _liepin_process_detail_batch(
+                    p, browser, page, login_recovery_used, page_filter_pass_jobs
+                )
+            )
+            final_jobs.extend(batch_kept)
+            if crawl_stop:
+                _crawl_liepin.last_collected = final_jobs
+                return final_jobs, browser
+        else:
+            log.info("📋 第 %s 页无硬校验通过岗位，跳过本页详情", current_page)
 
-                    page_text = page.evaluate("() => document.body.innerText")
-
-                    if not check_chatted(page_text):
-                        log.info(f"⚠️ 详情页含「继续聊」，排除岗位：{job['标题']}")
-                    else:
-                        job["介绍"] = extract_job_description(page)
-                        final_jobs.append(job)
-                        intro_preview = (job["介绍"][:50] + "...") if len(job.get("介绍") or "") > 50 else job.get("介绍", "")
-                        log.info(
-                            f"✅ 详情页无「继续聊」，保留岗位：{job['标题']}，提取岗位介绍：{intro_preview}"
-                        )
-                    time.sleep(3)
-                except Exception as e:
-                    # todo  详情页校验失败原因需要测试
-                    log.error(f"❌ 详情页校验失败 {job['标题']}：{str(e)}")
-                    # continue
-                    break
-            if relogin_retry:
-                continue
+        _liepin_random_nav_delay()
+        if scene_id is not None:
+            set_scene_last_page(scene_id, current_page)
+        current_page += 1
+        if current_page >= min(cfg.MAX_PAGE, maxpage_url):
+            crawl_finished_normally = True
             break
+
+    if crawl_finished_normally and scene_id is not None:
+        remove_scene_checkpoint(scene_id)
+
+    log.info(f"📊 猎聘列表与详情处理完成，累计有效岗位：{len(final_jobs)} 个")
 
     # 在返回前保存到函数属性
-    _crawl_liepin.last_collected = final_jobs  # 或 filter_pass_jobs
+    _crawl_liepin.last_collected = final_jobs
     log.info(f"✅ 猎聘最终有效岗位：{len(final_jobs)} 个")
     return final_jobs, browser
 

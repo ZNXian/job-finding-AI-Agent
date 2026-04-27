@@ -2,7 +2,9 @@
 # @CreatTime : 2026 19:06
 # @Author : XZN
 
-from fastapi import FastAPI, Body,UploadFile,File
+from typing import Annotated
+
+from fastapi import FastAPI, Body, File, Query, UploadFile
 import uvicorn
 # import asyncio
 
@@ -56,20 +58,44 @@ async def create_scene_from_txt( file_path: str = Body(..., embed=True)):
 # ==========================
 @handle_api_exception
 @app.post("/api/crawl_liepin")
-def run_crawl_and_ai(scene_id: int):  # 这里接收场景ID
+def run_crawl_and_ai(
+    scene_id: int,
+    crawl_only: Annotated[
+        bool,
+        Query(
+            description="为 True 时只执行 crawl_liepin（列表+详情循环），不调 LLM、不写 CSV",
+        ),
+    ] = False,
+    reset_checkpoint: Annotated[
+        bool,
+        Query(
+            description="为 True 时清除当前 scene_id 在 checkpoint.json 中的断点，从第 1 页（索引 0）重新爬",
+        ),
+    ] = False,
+):
     # 加载当前场景的动态配置
     dynamic_jobconfig.set(scene_manager.get_dynamic_jobconfig(scene_id))
-    # 1. 爬取岗位
-    jobs = crawl_liepin()
-    # 2. 调用 LLM + VLM 判断 并写入csv
-    for job in jobs:
-        write_to_csv(job,llm_process_job(job))
-    #
-    return {
+    # 1. 爬取岗位（内部按列表页 → 本页详情 → 下一列表页循环；支持断点续爬）
+    jobs = crawl_liepin(scene_id=scene_id, reset_checkpoint=reset_checkpoint)
+    # 2. 调用 LLM + VLM 判断 并写入csv（crawl_only 时跳过）
+    if not crawl_only:
+        for job in jobs:
+            write_to_csv(job, llm_process_job(job))
+    out = {
         "code": 200,
         "status": "success",
-        "csv_file": cfg.CSV_FILE
+        "scene_id": scene_id,
+        "crawl_only": crawl_only,
+        "job_count": len(jobs),
     }
+    if crawl_only:
+        out["jobs_preview"] = [
+            {"标题": j.get("标题"), "公司": j.get("公司"), "链接": j.get("链接")}
+            for j in jobs[:10]
+        ]
+    else:
+        out["csv_file"] = cfg.CSV_FILE
+    return out
 
 # ==========================
 # 接口 4：人工反馈 → 更新记忆
