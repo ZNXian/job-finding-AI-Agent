@@ -1,26 +1,34 @@
 # -*- coding: utf-8 -*-
 """
-多平台、多场景列表爬取断点（checkpoint.json）通用读写。
+多平台列表爬取断点（checkpoint.json）读写。
 
-猎聘示例（无 version）：
+猎聘（liepin）场景结构（不兼容仅含 last_page 的旧版）：
+
 {
   "liepin": {
     "platform": "liepin",
     "scenes": {
-      "6": {"last_page": 5},
-      "7": {"last_page": 0}
+      "7": {
+        "plan": [
+          { "city_code": "050140", "pubTime": 30 },
+          { "city_code": "050090", "pubTime": 7 }
+        ],
+        "segment_index": 0,
+        "last_list_page": 3
+      }
     }
   }
 }
 
-根下各 key 为平台标识（如 liepin）；每块含 "platform" 与 "scenes"。
-其它平台可并列写入同一文件，读写时指定 platform 即可。
+- plan: 本场景本次运行所需的全部 (city_code, pubTime) 子任务，顺序与列表爬取一致
+- segment_index: 当前断点所在的子任务下标（0 起）
+- last_list_page: 在 segment_index 对应 (city_code, pubTime) 下已完成的最后列表页 0 基下标；若尚未开爬该子任务则为 -1
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import log
 
@@ -35,21 +43,73 @@ def checkpoint_path(path: Optional[Path] = None) -> Path:
     return path if path is not None else DEFAULT_CHECKPOINT_PATH
 
 
-def _normalize_scenes_dict(scenes_raw: Any) -> Dict[str, Dict[str, int]]:
-    out: Dict[str, Dict[str, int]] = {}
+def _plan_entries_equal(
+    a: List[Dict[str, Any]], b: List[Dict[str, Any]]
+) -> bool:
+    if not isinstance(a, list) or not isinstance(b, list) or len(a) != len(b):
+        return False
+    for x, y in zip(a, b):
+        if not isinstance(x, dict) or not isinstance(y, dict):
+            return False
+        if str(x.get("city_code", "")) != str(y.get("city_code", "")):
+            return False
+        if int(x.get("pubTime", -1)) != int(y.get("pubTime", -1)):
+            return False
+    return True
+
+
+def _is_valid_liepin_entry(v: Any) -> bool:
+    if not isinstance(v, dict):
+        return False
+    p = v.get("plan")
+    if not isinstance(p, list) or not p:
+        return False
+    for item in p:
+        if not isinstance(item, dict):
+            return False
+        if "city_code" not in item or "pubTime" not in item:
+            return False
+    if "segment_index" not in v or "last_list_page" not in v:
+        return False
+    try:
+        int(v["segment_index"])
+        int(v["last_list_page"])
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _normalize_liepin_scenes(scenes_raw: Any) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
     if not isinstance(scenes_raw, dict):
         return out
     for k, v in scenes_raw.items():
-        if v is not None and isinstance(v, dict) and "last_page" in v:
+        if v is not None and _is_valid_liepin_entry(v):
             try:
-                out[str(int(k))] = {"last_page": int(v["last_page"])}
+                sk = str(int(k))
             except (TypeError, ValueError):
-                continue
+                sk = str(k)
+            p = v["plan"]
+            if isinstance(p, list):
+                plan: List[Dict[str, Any]] = []
+                for it in p:
+                    if not isinstance(it, dict):
+                        continue
+                    plan.append(
+                        {
+                            "city_code": str(it.get("city_code", "")).strip(),
+                            "pubTime": int(it.get("pubTime", 0)),
+                        }
+                    )
+                out[sk] = {
+                    "plan": plan,
+                    "segment_index": int(v["segment_index"]),
+                    "last_list_page": int(v["last_list_page"]),
+                }
     return out
 
 
 def _parse_root(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """仅接受根下各平台块：{ platform_key: { platform, scenes } }。"""
     out: Dict[str, Any] = {}
     for pk, block in raw.items():
         if not isinstance(block, dict) or _SCENES_KEY not in block:
@@ -57,13 +117,18 @@ def _parse_root(raw: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(block.get(_SCENES_KEY), dict):
             continue
         plat = str(block.get("platform", pk))
-        scenes = _normalize_scenes_dict(block[_SCENES_KEY])
+        if str(pk) == "liepin":
+            scenes = _normalize_liepin_scenes(block[_SCENES_KEY])
+        else:
+            # AI 删除
+            # 删除原因：本仓库现仅对 liepin 做断点；他平台可后续按相同模式扩展
+            continue
         out[str(pk)] = {"platform": plat, _SCENES_KEY: scenes}
     return out
 
 
 def load_checkpoint_document(path: Optional[Path] = None) -> Dict[str, Any]:
-    """读取 checkpoint 全文（多平台根对象）；结构不合法则返回 {}。"""
+    """读取 checkpoint 全文；结构不合法则返回 {}。"""
     p = checkpoint_path(path)
     if not p.exists():
         return {}
@@ -84,11 +149,13 @@ def _save_root(root: Dict[str, Any], path: Optional[Path] = None) -> None:
     for pk, block in root.items():
         if not isinstance(block, dict):
             continue
-        plat = str(block.get("platform", pk))
-        scenes = _normalize_scenes_dict(block.get(_SCENES_KEY, {}))
-        if not scenes:
+        if str(pk) == "liepin":
+            scenes = _normalize_liepin_scenes(block.get(_SCENES_KEY, {}))
+            if not scenes:
+                continue
+        else:
             continue
-        clean[str(pk)] = {"platform": plat, _SCENES_KEY: scenes}
+        clean[str(pk)] = {"platform": "liepin", _SCENES_KEY: scenes}
     if not clean:
         try:
             p.unlink(missing_ok=True)
@@ -106,78 +173,96 @@ def _get_platform_block(root: Dict[str, Any], platform: str) -> Dict[str, Any]:
     return {"platform": key, _SCENES_KEY: {}}
 
 
-def get_scene_last_done_page(
+def get_liepin_list_resume(
     scene_id: int,
-    *,
-    platform: str = _DEFAULT_PLATFORM,
-    path: Optional[Path] = None,
-) -> Optional[int]:
-    """若该平台 checkpoint 中存在该 scene_id，返回 last_page；否则 None。"""
-    root = load_checkpoint_document(path)
-    scenes = _get_platform_block(root, platform).get(_SCENES_KEY, {})
-    entry = scenes.get(str(int(scene_id)))
-    if not entry:
-        return None
-    try:
-        return int(entry["last_page"])
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def get_resume_list_page_index(
-    scene_id: int,
+    plan: List[Dict[str, Any]],
     *,
     reset: bool = False,
-    platform: str = _DEFAULT_PLATFORM,
     path: Optional[Path] = None,
-) -> int:
+) -> Tuple[int, int]:
     """
-    下一列表页起始索引（从 0 起）。reset=True：清除该平台下该场景并返回 0。
-    无记录返回 0；有记录返回 last_page + 1。
+    从断点得到本次猎聘列表爬起位置。
+    :return: (segment_index, list_start) — 从 plan[segment] 的列表第 list_start 页起抓（0 基）；reset 或无效则 (0,0)。
     """
+    if not plan:
+        return 0, 0
     if reset:
-        remove_scene_checkpoint(scene_id, platform=platform, path=path)
+        remove_scene_checkpoint(
+            int(scene_id), platform=_DEFAULT_PLATFORM, path=path
+        )
+        log.info("已清除猎聘场景 %s 的断点，从子任务 0 页 0 起", scene_id)
+        return 0, 0
+    root = load_checkpoint_document(path)
+    scenes = _get_platform_block(root, _DEFAULT_PLATFORM).get(_SCENES_KEY, {})
+    entry = scenes.get(str(int(scene_id)))
+    if not entry or not _is_valid_liepin_entry(entry):
+        return 0, 0
+    if not _plan_entries_equal(entry.get("plan", []), plan):
         log.info(
-            "已清除平台 %s 场景 %s 的断点，从列表页索引 0 开始",
-            platform,
+            "断点中 plan 与当前场景构建不一致，从子任务 0 页 0 起: scene_id=%s",
             scene_id,
         )
-        return 0
-    last_done = get_scene_last_done_page(scene_id, platform=platform, path=path)
-    if last_done is None:
-        return 0
-    nxt = last_done + 1
+        return 0, 0
+    seg = int(entry["segment_index"])
+    if seg < 0 or seg >= len(plan):
+        return 0, 0
+    last = int(entry["last_list_page"])
+    if last < 0:
+        return seg, 0
+    nxt = last + 1
     log.info(
-        "断点续爬[平台 %s 场景 %s]：上次已完成至列表页索引 %s，本次从索引 %s 开始",
-        platform,
+        "断点续爬[猎聘 场景 %s]: plan 子任务 %s (city_code=%s pubTime=%s)，上次已至第 %s 页，本段从第 %s 页起",
         scene_id,
-        last_done,
+        seg,
+        plan[seg].get("city_code"),
+        plan[seg].get("pubTime"),
+        last,
         nxt,
     )
-    return nxt
+    return seg, nxt
 
 
-def set_scene_last_page(
+def set_liepin_list_checkpoint(
     scene_id: int,
-    last_page: int,
+    plan: List[Dict[str, Any]],
+    segment_index: int,
+    last_list_page: int,
     *,
-    platform: str = _DEFAULT_PLATFORM,
     path: Optional[Path] = None,
 ) -> None:
-    """合并写入：更新该平台下该场景的 last_page。"""
+    # AI 生成
+    # 生成目的：写入当前 (segment_index) 在 plan 中对应的 city_code+pubTime 下已处理到的最后列表页
+    if plan is None:
+        return
     root = load_checkpoint_document(path)
-    key = str(platform)
-    block = dict(_get_platform_block(root, platform))
+    key = _DEFAULT_PLATFORM
+    block = dict(_get_platform_block(root, key))
     scenes: Dict[str, Any] = dict(block.get(_SCENES_KEY, {}))
-    scenes[str(int(scene_id))] = {"last_page": int(last_page)}
+    p_norm: List[Dict[str, Any]] = []
+    for it in plan:
+        if isinstance(it, dict):
+            p_norm.append(
+                {
+                    "city_code": str(it.get("city_code", "")).strip(),
+                    "pubTime": int(it.get("pubTime", 0)),
+                }
+            )
+    scenes[str(int(scene_id))] = {
+        "plan": p_norm,
+        "segment_index": int(segment_index),
+        "last_list_page": int(last_list_page),
+    }
     root[key] = {"platform": key, _SCENES_KEY: scenes}
     _save_root(root, path)
+    pseg = p_norm[segment_index] if 0 <= segment_index < len(p_norm) else {}
     log.info(
-        "断点已写入 %s 平台=%s 场景=%s last_page=%s",
+        "断点已写入 %s 猎聘 scene_id=%s segment_index=%s city_code=%s pubTime=%s last_list_page=%s",
         checkpoint_path(path),
-        platform,
         scene_id,
-        last_page,
+        segment_index,
+        pseg.get("city_code"),
+        pseg.get("pubTime"),
+        last_list_page,
     )
 
 
@@ -187,10 +272,11 @@ def remove_scene_checkpoint(
     platform: str = _DEFAULT_PLATFORM,
     path: Optional[Path] = None,
 ) -> None:
-    """移除该平台下指定场景；该平台无场景后移除该平台块；根为空则删文件。"""
+    if str(platform) != "liepin":
+        return
     root = load_checkpoint_document(path)
-    key = str(platform)
-    block = dict(_get_platform_block(root, platform))
+    key = _DEFAULT_PLATFORM
+    block = dict(_get_platform_block(root, key))
     scenes: Dict[str, Any] = dict(block.get(_SCENES_KEY, {}))
     sk = str(int(scene_id))
     if sk not in scenes:
@@ -206,7 +292,7 @@ def remove_scene_checkpoint(
             p.unlink(missing_ok=True)
         except OSError as e:
             log.debug("删除空 checkpoint 文件失败: %s", e)
-        log.info("断点文件已删除（无任何平台记录）: %s", p)
+        log.info("断点文件已删除（无记录）: %s", p)
         return
     _save_root(root, path)
-    log.debug("已移除平台 %s 场景 %s 的断点记录: %s", platform, scene_id, p)
+    log.debug("已移除猎聘场景 %s 的断点: %s", scene_id, p)

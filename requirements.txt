@@ -1,13 +1,18 @@
+# 依赖请安装到「本项目」的 venv，不要直接用系统全局的 pip/python。
+# 先激活：  .\.venv\Scripts\activate   或   .\venv\Scripts\activate
+# 再执行：  python -m pip install -r requirements.txt
+# 未激活时（把路径改成你的 venv 实际目录）：
+#   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+#
 fastapi==0.136.1
 uvicorn==0.46.0
 playwright==1.58.0
-langchain==1.2.15
-langchain-core==1.3.2
-langchain-community==0.4.1
+# Playwright stealth（社区维护），用于降低自动化特征
+playwright-stealth==1.0.6
 dashscope==1.25.17
 python-multipart==0.0.26
-faiss-cpu>=1.7.4
-numpy>=1.24.0,<2.0
-openai>=1.0.0
-python-dotenv>=1.0.0
+faiss-cpu==1.13.2
+numpy==1.26.4
+openai==2.32.0
+python-dotenv==1.2.2
 # optional: sentence-transformers (not required for FAISS+SQLite + OpenAI embeddings)

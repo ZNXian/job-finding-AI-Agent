@@ -10,6 +10,30 @@
 # 退出码约 -1073741819（0xC0000005，访问冲突）；曾尝试更换 chromadb 版本、换本地数据目录、gc/sleep、子进程
 # 隔离写入等，子进程内仍会同样崩溃，故改为 SQLite 存业务数据 + faiss-cpu 内存索引做向量检索，绕开该原生路径。
 #
+# AI 生成
+# 生成目的：总览「哪些数据、经哪条流程、进哪张表/库」
+# —————————————————————————————————————————————————————————————————
+# 根目录：默认项目下 faiss_sqlite_data/，可通过 set_job_store_dir 覆盖；本模块使用两类 SQLite 文件（相互独立）。
+#
+# （一）crawl_{platform}.db，表 list_jobs（按平台分库，如 crawl_liepin.db）
+#   · 首写：猎聘等爬虫在【列表页通过硬筛、尚未进详情或详情未跑完前】对每条岗位
+#     upsert_crawl_list_job(platform, scene_id, job_dict)
+#     写入/覆盖：id=md5(scene_id+url)、scene_id、title/company/location/description(列表侧「介绍」)、url、fetch_timestamp；
+#     用于 is_crawl_list_url_present 去重、断点与列表侧快照。INSERT OR REPLACE 会整行替换，未带 hr_greeting 时该列会按库默认回退。
+#   · 后写：API main 在【LLM 筛选 + write_to_csv 写 HR招呼语 列之后】
+#     utils.files.write_to_csv 内调用 update_crawl_list_hr_greeting(platform, scene_id, url, hr_greeting)
+#     对「已存在 list_jobs 行」UPDATE hr_greeting；无对应行则无任何插入（需先经列表 upsert）。
+#
+# （二）jobs.db，表 pending_jobs 与 memory_jobs（岗位「待人工 / 已决策」主库，与列表快照库分离）
+#   · pending_jobs：add_pending_job(job_dict) 在「该 url 的 id 既不在 pending 也不在 memory」时
+#     INSERT 一条元数据（id=md5(url) 仅按链接全局去重，与 list_jobs 主键不同）。
+#     本仓库主流程不强制从爬虫子模块自动写入，供后续待审核队列/其他入口调用；集成测试会主动调用。
+#   · memory_jobs：move_to_memory(job_id, approved|rejected, reason?) 在人工审核/反馈时
+#     从 pending 删除并写入 memory：含 status、reject_reason、reviewed_at；拒绝对象会算拒绝理由的 Embedding
+#     写入 reject_emb（BLOB），供 get_similar_rejected_reasons 做相似「不合适理由」检索（FAISS 在内存、不落盘；该
+#     查询过程中可能对缺向量的历史拒绝行补算 reject_emb 并回写表）。
+# —————————————————————————————————————————————————————————————————
+#
 
 from __future__ import annotations
 
@@ -82,6 +106,48 @@ def _crawl_db_path(platform: str) -> Path:
     return _store_dir() / _crawl_platform_db_filename(platform)
 
 
+def _ensure_list_jobs_hr_greeting(c: sqlite3.Connection) -> None:
+    # AI 生成
+    # 生成目的：列表快照表增加与 CSV 同步的「HR 招呼语」
+    cur = c.execute("PRAGMA table_info(list_jobs)").fetchall()
+    col_names = {r[1] for r in cur} if cur else set()
+    if "hr_greeting" in col_names:
+        return
+    c.execute(
+        "ALTER TABLE list_jobs ADD COLUMN hr_greeting TEXT NOT NULL DEFAULT ''"
+    )
+    c.commit()
+
+
+def _ensure_list_jobs_llm_cols(c: sqlite3.Connection) -> None:
+    """列表快照表增加 LLM 结构化筛选列（match_level/reason/apply）。"""
+    cur = c.execute("PRAGMA table_info(list_jobs)").fetchall()
+    col_names = {r[1] for r in cur} if cur else set()
+    alters: list[str] = []
+    if "match_level" not in col_names:
+        alters.append(
+            "ALTER TABLE list_jobs ADD COLUMN match_level TEXT NOT NULL DEFAULT ''"
+        )
+    if "reason" not in col_names:
+        alters.append("ALTER TABLE list_jobs ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
+    if "apply" not in col_names:
+        alters.append("ALTER TABLE list_jobs ADD COLUMN apply TEXT NOT NULL DEFAULT ''")
+    # 预留：人工复核字段（后续扩展用）
+    if "manual_apply" not in col_names:
+        alters.append(
+            "ALTER TABLE list_jobs ADD COLUMN manual_apply TEXT NOT NULL DEFAULT ''"
+        )
+    if "manual_reason" not in col_names:
+        alters.append(
+            "ALTER TABLE list_jobs ADD COLUMN manual_reason TEXT NOT NULL DEFAULT ''"
+        )
+    if not alters:
+        return
+    for sql in alters:
+        c.execute(sql)
+    c.commit()
+
+
 def _get_crawl_conn(platform: str) -> sqlite3.Connection:
     global _crawl_conns
     key = (platform or "unknown").strip().lower() or "unknown"
@@ -108,9 +174,77 @@ def _get_crawl_conn(platform: str) -> sqlite3.Connection:
                     ON list_jobs(scene_id, url);
                 """
             )
+            _ensure_list_jobs_hr_greeting(c)
+            _ensure_list_jobs_llm_cols(c)
             c.commit()
             _crawl_conns[key] = c
         return _crawl_conns[key]
+
+
+def update_crawl_list_hr_greeting(
+    platform: str, scene_id: int, url: str, hr_greeting: str
+) -> None:
+    # AI 生成
+    # 生成目的：在列表爬取表上按 scene_id+url 回写与 CSV 一致的招呼语
+    u = (url or "").strip()
+    if not u:
+        return
+    conn = _get_crawl_conn(platform)
+    with _lock:
+        _ensure_list_jobs_hr_greeting(conn)
+        conn.execute(
+            "UPDATE list_jobs SET hr_greeting = ? WHERE scene_id = ? AND url = ?",
+            (hr_greeting or "", int(scene_id), u),
+        )
+        conn.commit()
+
+
+def update_crawl_list_llm_fields(
+    platform: str,
+    scene_id: int,
+    url: str,
+    *,
+    match_level: str = "",
+    reason: str = "",
+    apply: str = "",
+    hr_greeting: str = "",
+) -> None:
+    """LLM 完成后回写 list_jobs 的结构化筛选列与招呼语（按 scene_id+url）。"""
+    u = (url or "").strip()
+    if not u:
+        return
+    conn = _get_crawl_conn(platform)
+    with _lock:
+        _ensure_list_jobs_hr_greeting(conn)
+        _ensure_list_jobs_llm_cols(conn)
+        conn.execute(
+            "UPDATE list_jobs SET match_level = ?, reason = ?, apply = ?, hr_greeting = ? "
+            "WHERE scene_id = ? AND url = ?",
+            (
+                str(match_level or ""),
+                str(reason or ""),
+                str(apply or ""),
+                str(hr_greeting or ""),
+                int(scene_id),
+                u,
+            ),
+        )
+        conn.commit()
+
+def update_crawl_list_description(
+    platform: str, scene_id: int, url: str, description: str
+) -> None:
+    """详情阶段回写 list_jobs.description（避免 INSERT OR REPLACE 覆盖 hr_greeting）。"""
+    u = (url or "").strip()
+    if not u:
+        return
+    conn = _get_crawl_conn(platform)
+    with _lock:
+        conn.execute(
+            "UPDATE list_jobs SET description = ? WHERE scene_id = ? AND url = ?",
+            (str(description or ""), int(scene_id), u),
+        )
+        conn.commit()
 
 
 def crawl_list_row_id(scene_id: int, url: str) -> str:

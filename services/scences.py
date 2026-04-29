@@ -94,6 +94,7 @@ class SceneManager:
                     "scene_id": max_id + 1,
                     "search_keywords": standard_json["search_keywords"],
                     "city": standard_json["city"],
+                    "province": standard_json.get("province", "") or "",
                     "accept_remote": standard_json["accept_remote"],
                     "min_salary": standard_json["min_salary"],
                     "max_salary": standard_json["max_salary"],
@@ -145,13 +146,20 @@ class SceneManager:
         if not scene:
             raise Exception(f"场景 {scene_id} 不存在")
 
-        REMOTE_KEYWORDS = ["远程", "居家", "灵活办公", "异地办公"]
+        REMOTE_KEYWORDS = ["远程", "居家", "灵活", "异地"]
         
         path = Path(__file__).resolve().parent.parent / "data"
         path.mkdir(parents=True, exist_ok=True)
+        c = scene.get("city")
+        if isinstance(c, list):
+            preferred_cities = c
+        else:
+            preferred_cities = [c] if c else []
         return {
             "SEARCH_KEYWORD": " ".join(scene["search_keywords"]),
-            "PREFERRED_CITIES": [scene["city"]],
+            "PREFERRED_CITIES": preferred_cities,
+            "PROVINCE": scene.get("province", "") or "",
+            "ACCEPT_REMOTE": bool(scene.get("accept_remote", False)),
             "REMOTE_KEYWORDS": REMOTE_KEYWORDS if scene["accept_remote"] else [""],
             "REQUIRED_KEYWORDS": scene["search_keywords"],
             "MIN_SALARY": scene["min_salary"],

@@ -12,9 +12,13 @@ temp.txt
 temp.jpg
 *.csv
 *.txt
+*.json
+*.png
+
 !requirements.txt
 log
 browser_data
+screenshots
 faiss_sqlite_data
 job_store_verify_test
 venv
@@ -23,6 +27,8 @@ venv
 !data/
 data/*
 !data/default_jobconfig.json
+scripts
+
 
 # 系统
 .DS_Store

@@ -36,31 +36,24 @@ def hard_filter(title, area, salary):
     area = area.lower()
     salary = salary.lower()
 
-    # ====== 规则1：薪资筛选 ======
-    sal_min, sal_max = parse_salary_range(salary)
-    if "面议" not in salary:
-        if sal_max < cfg.MIN_SALARY or sal_min > cfg.MAX_SALARY:
-            log.info(
-                f"⚠️ 薪资筛选排除：{salary}（最高{sal_max}K < 要求{cfg.MIN_SALARY}K 或 最低{sal_min}K > 要求{cfg.MAX_SALARY}K）")
-            return False
+    # # ====== 规则1：薪资筛选 ======
+    # sal_min, sal_max = parse_salary_range(salary)
+    # if "面议" not in salary:
+    #     if sal_max < cfg.MIN_SALARY or sal_min > cfg.MAX_SALARY:
+    #         log.info(
+    #             f"⚠️ 薪资筛选排除：{salary}（最高{sal_max}K < 要求{cfg.MIN_SALARY}K 或 最低{sal_min}K > 要求{cfg.MAX_SALARY}K）")
+    #         return False
 
     # ====== 规则2：地点+远程关键词筛选 ======
     in_preferred_city = any(c.lower() in area for c in cfg.PREFERRED_CITIES)
-
     if in_preferred_city:
         return True
-    else:
-        has_remote_keyword = any(
+    has_remote_keyword = any(
             w.lower() in title or w.lower() in area
             for w in cfg.REMOTE_KEYWORDS
         )
-        # 新增：工作地筛选日志
-        if has_remote_keyword:
-            log.info(f"📍 工作地筛选：地点={area}（非首选城市），但含远程关键词 → 保留该岗位")
-        else:
-            log.info(f"📍 工作地筛选：地点={area}（非首选城市），且无远程关键词 → 排除该岗位")
+    return has_remote_keyword or in_preferred_city
 
-        return has_remote_keyword
 
 def check_chatted(chat_text):
     """检查是否需要继续聊天"""

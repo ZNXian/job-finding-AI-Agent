@@ -9,7 +9,12 @@ import uvicorn
 # import asyncio
 
 from crawlers.liepin import crawl_liepin, login_liepin
-from services.llm_services import llm_process_job,llm_identify_scene
+from services.llm_services import llm_identify_scene
+from services.llm_services import (
+    LLM_JOB_FILTER_BATCH_MAX,
+    llm_process_job,
+    llm_process_jobs_batch,
+)
 from services.scences import scene_manager
 from services.memory_services import update_scene_memory
 # import config
@@ -25,9 +30,9 @@ app = FastAPI(title="job finding AI Agent", version="1.0")
 # 接口 1：猎聘登录接口
 # ==========================
 @app.post("/api/liepin_login")
-@handle_api_exception
-def liepin_login():
-    login_liepin()
+@handle_api_exception_async
+async def liepin_login():
+    await login_liepin()
     return {
         "code": 200,
         "status": "success",
@@ -56,9 +61,9 @@ async def create_scene_from_txt( file_path: str = Body(..., embed=True)):
 # ==========================
 # 接口 3：爬取 + AI 判断 → 输出CSV
 # ==========================
-@handle_api_exception
+@handle_api_exception_async
 @app.post("/api/crawl_liepin")
-def run_crawl_and_ai(
+async def run_crawl_and_ai(
     scene_id: int,
     crawl_only: Annotated[
         bool,
@@ -76,11 +81,25 @@ def run_crawl_and_ai(
     # 加载当前场景的动态配置
     dynamic_jobconfig.set(scene_manager.get_dynamic_jobconfig(scene_id))
     # 1. 爬取岗位（内部按列表页 → 本页详情 → 下一列表页循环；支持断点续爬）
-    jobs = crawl_liepin(scene_id=scene_id, reset_checkpoint=reset_checkpoint)
+    jobs = await crawl_liepin(scene_id=scene_id, reset_checkpoint=reset_checkpoint)
     # 2. 调用 LLM + VLM 判断 并写入csv（crawl_only 时跳过）
     if not crawl_only:
-        for job in jobs:
-            write_to_csv(job, llm_process_job(job))
+        if not jobs:
+            return {
+                "code": 200,
+                "status": "success",
+                "scene_id": scene_id,
+                "crawl_only": crawl_only,
+                "job_count": 0,
+                "csv_file": cfg.CSV_FILE,
+            }
+        for i in range(0, len(jobs), LLM_JOB_FILTER_BATCH_MAX):
+            batch = jobs[i : i + LLM_JOB_FILTER_BATCH_MAX]
+            outs = llm_process_jobs_batch(batch, scene_id=scene_id)
+            # 防御：模型或异常导致 outs 长度不一致时，确保每个 job 都能落库
+            for j, job in enumerate(batch):
+                out = outs[j] if isinstance(outs, list) and j < len(outs) else {}
+                write_to_csv(job, out, scene_id=scene_id)
     out = {
         "code": 200,
         "status": "success",
