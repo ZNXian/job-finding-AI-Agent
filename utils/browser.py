@@ -156,16 +156,16 @@ async def random_click_blank(page) -> None:
         return
 
 
-async def human_behavior(page) -> None:
+async def human_behavior(page,d_long_use=True) -> None:
     """模拟人类行为（完全随机化版本）"""
-    
-    # 1. 偶尔的长休息（5%概率）
-    if random.random() < 0.05:
-        d_long = random.uniform(20.0, 60.0)
-        await asyncio.sleep(d_long)
-        log.debug(f"长休息 {d_long:.1f}秒")
-        return  # 长休息后直接返回，不再执行其他动作
-    
+    if d_long_use:
+        # 1. 偶尔的长休息（5%概率）
+        if random.random() < 0.05:
+            d_long = random.uniform(20.0, 60.0)
+            log.debug(f"长休息 {d_long:.1f}秒")
+            await asyncio.sleep(d_long)
+            
+            return  # 长休息后直接返回，不再执行其他动作
     # 2. 随机决定本次要执行的动作数量和顺序
     actions = []
     
@@ -187,10 +187,10 @@ async def human_behavior(page) -> None:
         # 动作间随机停顿 0.3-1.5 秒
         await asyncio.sleep(random.uniform(0.3, 1.5))
     
-    # 3. 最终随机停顿（0.5-3秒）
-    final_wait = random.uniform(0.5, 3.0)
+    # 3. 最终随机停顿（0.3-1秒）
+    final_wait = random.uniform(0.3, 1.0)
     await asyncio.sleep(final_wait)
-    log.debug(f"最终随机停顿 {final_wait:.1f}秒")
+    # log.debug(f"最终随机停顿 {final_wait:.1f}秒")
 
 
 async def is_trap_job_card(card) -> bool:

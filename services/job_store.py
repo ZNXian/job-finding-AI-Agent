@@ -180,6 +180,16 @@ def _ensure_list_jobs_platform_cols(c: sqlite3.Connection) -> None:
     c.commit()
 
 
+def _ensure_list_jobs_salary_col(c: sqlite3.Connection) -> None:
+    """列表快照表增加薪资字段（给 LLM 输入/导出使用）。"""
+    cur = c.execute("PRAGMA table_info(list_jobs)").fetchall()
+    col_names = {r[1] for r in cur} if cur else set()
+    if "salary" in col_names:
+        return
+    c.execute("ALTER TABLE list_jobs ADD COLUMN salary TEXT NOT NULL DEFAULT ''")
+    c.commit()
+
+
 def _get_crawl_conn(platform: str) -> sqlite3.Connection:
     global _crawl_conns
     key = (platform or "unknown").strip().lower() or "unknown"
@@ -200,6 +210,7 @@ def _get_crawl_conn(platform: str) -> sqlite3.Connection:
                     title TEXT NOT NULL DEFAULT '',
                     company TEXT NOT NULL DEFAULT '',
                     location TEXT NOT NULL DEFAULT '',
+                    salary TEXT NOT NULL DEFAULT '',
                     description TEXT NOT NULL DEFAULT '',
                     url TEXT NOT NULL DEFAULT '',
                     fetch_timestamp TEXT NOT NULL DEFAULT ''
@@ -209,6 +220,7 @@ def _get_crawl_conn(platform: str) -> sqlite3.Connection:
             _ensure_list_jobs_hr_greeting(c)
             _ensure_list_jobs_llm_cols(c)
             _ensure_list_jobs_platform_cols(c)
+            _ensure_list_jobs_salary_col(c)
             c.commit()
             _crawl_conns[key] = c
         return _crawl_conns[key]
@@ -313,6 +325,7 @@ def _job_dict_from_liepin_list(job_dict: Dict[str, Any]) -> Dict[str, str]:
     title = str(job_dict.get("标题") or job_dict.get("title", "")).strip()
     company = str(job_dict.get("公司") or job_dict.get("company", "")).strip()
     location = str(job_dict.get("地点") or job_dict.get("location", "")).strip()
+    salary = str(job_dict.get("薪资") or job_dict.get("salary", "")).strip()
     description = str(job_dict.get("介绍") or job_dict.get("description", "")).strip()
     url = normalize_liepin_link_keep_first_q(str(job_dict.get("链接") or job_dict.get("url", "")).strip())
     ts = job_dict.get("fetch_timestamp")
@@ -325,6 +338,7 @@ def _job_dict_from_liepin_list(job_dict: Dict[str, Any]) -> Dict[str, str]:
         "title": title,
         "company": company,
         "location": location,
+        "salary": salary,
         "description": description,
         "url": url,
         "fetch_timestamp": fetch_timestamp,
@@ -366,8 +380,8 @@ def upsert_crawl_list_job(platform: str, scene_id: int, job_dict: Dict[str, Any]
         _ensure_list_jobs_platform_cols(conn)
         conn.execute(
             """INSERT OR REPLACE INTO list_jobs
-            (id, scene_id, platform, platform_job_id, title, company, location, description, url, fetch_timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (id, scene_id, platform, platform_job_id, title, company, location, salary, description, url, fetch_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 jid,
                 int(scene_id),
@@ -376,12 +390,79 @@ def upsert_crawl_list_job(platform: str, scene_id: int, job_dict: Dict[str, Any]
                 f["title"],
                 f["company"],
                 f["location"],
+                str(f.get("salary", "") or ""),
                 f["description"],
                 f["url"],
                 f["fetch_timestamp"],
             ),
         )
         conn.commit()
+
+
+def get_unprocessed_crawl_list_jobs_for_llm(
+    platform: str,
+    scene_id: int,
+    *,
+    match_level_empty_only: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    从 crawl_{platform}.db 的 list_jobs 读取尚未做过 LLM 的岗位。
+
+    约束：当 match_level_empty_only=True 时，匹配：
+      - match_level == ''，或
+      - reason == '解析失败'
+    并要求 platform_job_id 可用。
+    """
+    platform_name = str(platform or "").strip().lower() or "liepin"
+    conn = _get_crawl_conn(platform_name)
+    with _lock:
+        _ensure_list_jobs_llm_cols(conn)
+        _ensure_list_jobs_salary_col(conn)
+
+        where_match_level = (
+            "(match_level = '' OR reason = '解析失败')" if match_level_empty_only else "1=1"
+        )
+        rows = conn.execute(
+            f"""
+            SELECT
+                platform,
+                platform_job_id,
+                title,
+                company,
+                salary,
+                location,
+                description,
+                url,
+                fetch_timestamp
+            FROM list_jobs
+            WHERE scene_id = ?
+              AND platform = ?
+              AND {where_match_level}
+              AND length(platform_job_id) > 0
+            ORDER BY
+              CASE WHEN fetch_timestamp = '' THEN 1 ELSE 0 END,
+              fetch_timestamp
+            """,
+            (int(scene_id), platform_name),
+        ).fetchall()
+
+    plat_cn = "猎聘" if platform_name == "liepin" else platform_name
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "平台": plat_cn,
+                "platform": platform_name,
+                "platform_job_id": str(r["platform_job_id"] or ""),
+                "标题": str(r["title"] or ""),
+                "公司": str(r["company"] or ""),
+                "薪资": str(r["salary"] or ""),
+                "地点": str(r["location"] or ""),
+                "链接": str(r["url"] or ""),
+                "介绍": str(r["description"] or ""),
+            }
+        )
+    return out
 
 
 def _get_conn() -> sqlite3.Connection:

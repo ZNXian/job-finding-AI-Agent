@@ -48,11 +48,15 @@ def hard_filter(title, area, salary):
     in_preferred_city = any(c.lower() in area for c in cfg.PREFERRED_CITIES)
     if in_preferred_city:
         return True
-    has_remote_keyword = any(
+    if cfg.ACCEPT_REMOTE:
+        has_remote_keyword = any(
             w.lower() in title or w.lower() in area
             for w in cfg.REMOTE_KEYWORDS
         )
-    return has_remote_keyword or in_preferred_city
+        return has_remote_keyword
+    else:
+        return True
+
 
 
 def check_chatted(chat_text):

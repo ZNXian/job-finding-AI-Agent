@@ -4,6 +4,7 @@
 # 文本 LLM：百炼 OpenAI 兼容模式；筛选与招呼语按批（最多 50 条）结构化 JSON 调用。
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import config as cfg
@@ -16,7 +17,9 @@ from services.dashscope_openai import (
 
 os.environ["DASHSCOPE_API_KEY"] = (DASHSCOPE_API_KEY or "").strip()
 
-LLM_JOB_FILTER_BATCH_MAX = 50
+LLM_JOB_FILTER_BATCH_MAX = 15
+_FILTER_JOB_INTRO_MAX_CHARS = 1200
+_FILTER_MY_REQUIREMENT_MAX_CHARS = 2500
 
 _FILTER_BATCH_SYSTEM = (
     "你是一个严格的数据格式化引擎。用户消息中包含同一批多个岗位（编号从 0 开始连续整数），"
@@ -26,7 +29,7 @@ _FILTER_BATCH_SYSTEM = (
     "每一项对象必须包含且仅包含：\n"
     "- index: integer，0 到 N-1，与消息中「岗位编号」一致\n"
     "- match_level: string，仅能为 高、中、低 之一\n"
-    "- reason: string，简述匹配或不匹配理由\n"
+    "- reason: string，简述匹配或不匹配理由，长度不超过 100 字符（建议单句）\n"
     "- apply: string，仅能为 是 或 否，表示是否建议投递\n"
     "\n"
     + STRUCTURED_JSON_ENGINE_RULES
@@ -35,7 +38,7 @@ _FILTER_BATCH_SYSTEM = (
 _GREETING_BATCH_SYSTEM = (
     "你是一个严格的数据格式化引擎。用户消息中包含【我的求职场景】及若干「需要撰写打招呼」的岗位工作介绍，"
     "每个岗位带整数序号（与筛选批内编号一致）。\n"
-    "招呼语须：语气专业有礼貌、突出与岗位匹配点、不编造简历没有的经历；单段、不超过 200 汉字（含标点），"
+    "招呼语须：语气专业有礼貌、突出与岗位匹配点、不编造简历没有的经历；单段、不超过 100 汉字（含标点），"
     "不要标题、不要分条、不要「敬上」等套话结尾。\n"
     "【目标结构】\n"
     "输出 JSON：键 items 为数组。每项含：\n"
@@ -77,20 +80,26 @@ _STANDARD_SYSTEM = (
 
 
 def _job_info_block(job: Dict[str, Any]) -> str:
+    intro = str(job.get("介绍") or job.get("description", "") or "").strip()
+    if len(intro) > _FILTER_JOB_INTRO_MAX_CHARS:
+        intro = intro[:_FILTER_JOB_INTRO_MAX_CHARS] + "…"
     return (
         f"岗位：{job.get('标题', '')}\n公司：{job.get('公司', '')}\n薪资：{job.get('薪资', '')}\n"
-        f"地点：{job.get('地点', '')}\n岗位介绍：{job.get('介绍', '')}"
+        f"地点：{job.get('地点', '')}\n岗位介绍：{intro}"
     )
 
 
 def _build_filter_batch_user_message(jobs: List[Dict[str, Any]]) -> str:
     n = len(jobs)
     last = n - 1
+    my_req = str(cfg.MY_REQUIREMENT or "").strip()
+    if len(my_req) > _FILTER_MY_REQUIREMENT_MAX_CHARS:
+        my_req = my_req[:_FILTER_MY_REQUIREMENT_MAX_CHARS] + "…"
     lines: List[str] = [
         "你是专业求职筛选助手，严格按条件独立判断本批每一个岗位。",
         "",
         "我的要求：",
-        str(cfg.MY_REQUIREMENT),
+        my_req,
         "",
         f"本批共 {n} 个岗位，编号 0 到 {last}。请对每个编号分别给出匹配度、理由、是否投递（结构化结果见系统说明）。",
         "",
@@ -154,7 +163,26 @@ def _call_filter_batch_structured(jobs: List[Dict[str, Any]]) -> List[Dict[str, 
     data = _parse_json_object(raw) or {}
     items = data.get("items")
     if not isinstance(items, list):
-        log.warning("批量筛选：返回无 items 数组，已用占位填充")
+        # 临时调试：
+        # 1) 打印 raw 的尾部（避免日志爆量）
+        # 2) 判断 raw 是否能被 json.loads 解析，便于定位 structured output 失败原因
+        tail_n = 2000
+        raw_str = raw or ""
+        raw_tail = raw_str[-tail_n:].replace("\n", "\\n").replace("\r", "\\r")
+        can_load = True
+        load_err = ""
+        try:
+            json.loads(raw_str)
+        except Exception as e:
+            can_load = False
+            load_err = str(e)
+        log.warning(
+            "批量筛选：返回无 items 数组，已用占位填充 tail_n=%s can_json_loads=%s err=%s raw_tail=%s",
+            tail_n,
+            can_load,
+            load_err[:300],
+            raw_tail,
+        )
         return [
             {"index": i, "match_level": "低", "reason": "解析失败", "apply": "否"}
             for i in range(n)
@@ -182,7 +210,11 @@ def _call_filter_batch_structured(jobs: List[Dict[str, Any]]) -> List[Dict[str, 
                 "match_level": _normalize_match_level(
                     it.get("match_level") or it.get("匹配度")
                 ),
-                "reason": str(it.get("reason") or it.get("理由") or "").strip() or "（无）",
+                "reason": (
+                    (str(it.get("reason") or it.get("理由") or "").strip() or "（无）")[
+                        :100
+                    ]
+                ),
                 "apply": _normalize_apply(it.get("apply") or it.get("是否投递")),
             }
         )
@@ -193,10 +225,15 @@ def _build_greeting_batch_user_message(
     scene_context: str,
     jobs: List[Dict[str, Any]],
     indices: List[int],
+    scene_id: Optional[int] = None,
 ) -> str:
+    resume_text = _load_scene_resume_text(scene_id)
+    profile_text = resume_text if resume_text else scene_context
     lines: List[str] = [
-        "以下为【我的求职场景】：",
-        scene_context[:6000],
+        "以下为【候选人信息】（优先使用场景简历，缺失时回退为场景上下文）：",
+        (profile_text or "（无）")[:6000],
+        "",
+        "硬性要求：不允许编造不存在的经历,只能按照已有内容对岗位进行适配。",
         "",
         "以下岗位在筛选中匹配度为「高」或「中」，请为每个序号各写一段打招呼（见系统 JSON 说明）。",
         "",
@@ -213,10 +250,11 @@ def _call_greeting_batch_structured(
     scene_context: str,
     jobs: List[Dict[str, Any]],
     indices: List[int],
+    scene_id: Optional[int] = None,
 ) -> Dict[int, str]:
     if not indices:
         return {}
-    user = _build_greeting_batch_user_message(scene_context, jobs, indices)
+    user = _build_greeting_batch_user_message(scene_context, jobs, indices, scene_id=scene_id)
     raw = chat_completion_text(
         [
             {"role": "system", "content": _GREETING_BATCH_SYSTEM},
@@ -268,6 +306,19 @@ def _scene_context_for_greeting(scene_id: int) -> str:
     )
 
 
+def _load_scene_resume_text(scene_id: Optional[int]) -> str:
+    """读取场景简历文本：data/resume/{scene_id}.txt。不存在或为空时返回空字符串。"""
+    if scene_id is None:
+        return ""
+    try:
+        p = Path(__file__).resolve().parent.parent / "data" / "resume" / f"{int(scene_id)}.txt"
+        if not p.is_file():
+            return ""
+        return p.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
 def llm_process_jobs_batch(
     jobs: List[Dict[str, Any]],
     scene_id: Optional[int] = None,
@@ -303,7 +354,12 @@ def llm_process_jobs_batch(
         if greet_indices and scene_id is not None:
             try:
                 sc = _scene_context_for_greeting(int(scene_id))
-                greetings = _call_greeting_batch_structured(sc, chunk, greet_indices)
+                greetings = _call_greeting_batch_structured(
+                    sc,
+                    chunk,
+                    greet_indices,
+                    scene_id=scene_id,
+                )
             except Exception as e:
                 log.warning("批量招呼语生成失败: %s", e)
         for i, it in enumerate(filter_items):

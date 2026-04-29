@@ -296,68 +296,83 @@ async def crawl_with_higher_logic(
     final_jobs: List[Dict[str, Any]] = []
     restart_after_jobs = 30
     jobs_since_browser_restart = 0
-    current_page = int(list_start)
+    start_seg_idx = seg_idx
+    stop_all = False
+    while seg_idx < len(plan) and not stop_all:
+        current_page = int(list_start) if seg_idx == start_seg_idx else 0
+        effective_max_page = max(1, int(max_page))
+        loop_upper_page = current_page + effective_max_page
+        real_max_page_checked = False
 
-    while current_page < list_start + max_page:
-        list_url = _build_list_url(
-            plan_item=plan[seg_idx],
-            current_page=current_page,
-            encoded_key=encoded_key,
-            salary_code=salary_code,
-        )
-        log.info(f"list_url: {list_url}")
-        kept: List[Dict[str, Any]] = []
-        try:
-            await page.goto(list_url, timeout=60000, wait_until="domcontentloaded")
-            await human_behavior(page)
-            browser, page, login_recovery_used, items = await _recover_login_and_load_list_cards(
-                pw, browser, page, login_recovery_used, list_url
+        while current_page < loop_upper_page:
+            list_url = _build_list_url(
+                plan_item=plan[seg_idx],
+                current_page=current_page,
+                encoded_key=encoded_key,
+                salary_code=salary_code,
             )
-            if items is None:
-                break
-
-            page_filter_pass_jobs = await _collect_page_filter_pass_jobs(
-                items=items,
-                page=page,
-                crawl_scene_id=crawl_scene_id,
-            )
-
-            kept, stop_result = await _process_detail_jobs(
-                page=page,
-                browser=browser,
-                page_filter_pass_jobs=page_filter_pass_jobs,
-                crawl_scene_id=crawl_scene_id,
-                final_jobs=final_jobs,
-            )
-            if stop_result is not None:
-                return stop_result
-        except TargetClosedError:
-            log.info("检测到浏览器被手动关闭：停止翻页并返回已收集岗位数=%s", len(final_jobs))
-            return final_jobs
-
-        final_jobs.extend(kept)
-        jobs_since_browser_restart += len(kept)
-        if jobs_since_browser_restart >= restart_after_jobs:
-            log.info(
-                "已累计 %s 条岗位，重启浏览器以继续爬取",
-                jobs_since_browser_restart,
-            )
+            log.info(f"list_url: {list_url}")
+            kept: List[Dict[str, Any]] = []
             try:
-                await browser.close()
-            except Exception:
-                pass
-            storage_state = _liepin_storage_state_for_launch()
-            browser = await get_browser(
-                pw,
-                headless=cfg.CRAWL_HEADLESS,
-                storage_state=storage_state,
-            )
-            page = await browser.new_page()
-            await apply_anti_detect_init_scripts(page)
-            login_recovery_used = False
-            jobs_since_browser_restart = 0
-        set_liepin_list_checkpoint(crawl_scene_id, plan, seg_idx, current_page)
-        current_page += 1
+                await page.goto(list_url, timeout=60000, wait_until="domcontentloaded")
+                await human_behavior(page, d_long_use=False)
+                browser, page, login_recovery_used, items = await _recover_login_and_load_list_cards(
+                    pw, browser, page, login_recovery_used, list_url
+                )
+                if items is None:
+                    stop_all = True
+                    break
+                if not real_max_page_checked:
+                    real_max_page = await _get_liepin_max_page_async(page)
+                    effective_max_page = min(max(1, int(max_page)), max(1, int(real_max_page)))
+                    loop_upper_page = current_page + effective_max_page
+                    real_max_page_checked = True
+
+                page_filter_pass_jobs = await _collect_page_filter_pass_jobs(
+                    items=items,
+                    page=page,
+                    crawl_scene_id=crawl_scene_id,
+                )
+
+                kept, stop_result = await _process_detail_jobs(
+                    page=page,
+                    browser=browser,
+                    page_filter_pass_jobs=page_filter_pass_jobs,
+                    crawl_scene_id=crawl_scene_id,
+                    final_jobs=final_jobs,
+                )
+                if stop_result is not None:
+                    return stop_result
+            except TargetClosedError:
+                log.info("检测到浏览器被手动关闭：停止翻页并返回已收集岗位数=%s", len(final_jobs))
+                return final_jobs
+
+            final_jobs.extend(kept)
+            jobs_since_browser_restart += len(kept)
+            if jobs_since_browser_restart >= restart_after_jobs:
+                log.info(
+                    "已累计 %s 条岗位，重启浏览器以继续爬取",
+                    jobs_since_browser_restart,
+                )
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                storage_state = _liepin_storage_state_for_launch()
+                browser = await get_browser(
+                    pw,
+                    headless=cfg.CRAWL_HEADLESS,
+                    storage_state=storage_state,
+                )
+                page = await browser.new_page()
+                await apply_anti_detect_init_scripts(page)
+                login_recovery_used = False
+                jobs_since_browser_restart = 0
+            set_liepin_list_checkpoint(crawl_scene_id, plan, seg_idx, current_page)
+            current_page += 1
+
+        seg_idx += 1
+        list_start = 0
 
     log_liepin_vlm_stats_summary()
     return final_jobs
@@ -401,6 +416,30 @@ def _build_list_url(
         f"&pubTime={pub_time}&currentPage={current_page}&pageSize=40"
         f"&key={encoded_key}&salaryCode={salary_code}"
     )
+
+
+async def _get_liepin_max_page_async(page) -> int:
+    """从分页栏读取真实最大页数（Antd 分页）；失败返回 1。"""
+    try:
+        await page.wait_for_selector(".ant-pagination", timeout=5000)
+        max_page = await page.evaluate(
+            """() => {
+                const numButtons = document.querySelectorAll(
+                    '.ant-pagination-item:not(.ant-pagination-prev):not(.ant-pagination-next):not(.ant-pagination-jump-prev):not(.ant-pagination-jump-next)'
+                );
+                if (!numButtons || numButtons.length === 0) return 1;
+                const lastBtn = numButtons[numButtons.length - 1];
+                const pageNum = (lastBtn && (lastBtn.title || lastBtn.innerText)) || '';
+                const n = parseInt(pageNum, 10);
+                return Number.isFinite(n) && n > 0 ? n : 1;
+            }"""
+        )
+        max_page = int(max_page or 1)
+        log.info("✅ 识别到真实最大页数：%s", max_page)
+        return max(1, max_page)
+    except Exception as e:
+        log.warning("⚠️ 读取最大页数失败，默认爬 1 页：%s", e)
+        return 1
 
 
 async def _collect_page_filter_pass_jobs(
@@ -452,7 +491,7 @@ async def _process_detail_jobs(
                 await browser.close()
                 return kept, stop_result
 
-            job["介绍"] = job["业务方向与规模"] + "\n" + job["介绍"]
+            job["介绍"] = "公司业务方向与规模:"+job["业务方向与规模"] + "\n" +"招聘详情(已截断):"+ job["介绍"]
             _persist_passed_job(job, crawl_scene_id)
             kept.append(job)
         except TargetClosedError:

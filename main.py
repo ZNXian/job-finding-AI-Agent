@@ -15,6 +15,7 @@ from services.llm_services import (
     llm_process_job,
     llm_process_jobs_batch,
 )
+from services.job_store import get_unprocessed_crawl_list_jobs_for_llm
 from services.scences import scene_manager
 from services.memory_services import update_scene_memory
 # import config
@@ -78,28 +79,23 @@ async def run_crawl_and_ai(
         ),
     ] = False,
 ):
-    # 加载当前场景的动态配置
+    # 旧接口：为兼容保留，但内部统一走「crawl-only + submit」流程
     dynamic_jobconfig.set(scene_manager.get_dynamic_jobconfig(scene_id))
-    # 1. 爬取岗位（内部按列表页 → 本页详情 → 下一列表页循环；支持断点续爬）
     jobs = await crawl_liepin(scene_id=scene_id, reset_checkpoint=reset_checkpoint)
-    # 2. 调用 LLM + VLM 判断 并写入csv（crawl_only 时跳过）
     if not crawl_only:
-        if not jobs:
-            return {
-                "code": 200,
-                "status": "success",
-                "scene_id": scene_id,
-                "crawl_only": crawl_only,
-                "job_count": 0,
-                "csv_file": cfg.CSV_FILE,
-            }
-        for i in range(0, len(jobs), LLM_JOB_FILTER_BATCH_MAX):
-            batch = jobs[i : i + LLM_JOB_FILTER_BATCH_MAX]
+        # 从 SQLite 读取未处理岗位行（match_level=''），避免依赖 crawl 返回值与缓存
+        submitted_jobs = get_unprocessed_crawl_list_jobs_for_llm(
+            "liepin",
+            scene_id,
+            match_level_empty_only=True,
+        )
+        for i in range(0, len(submitted_jobs), LLM_JOB_FILTER_BATCH_MAX):
+            batch = submitted_jobs[i : i + LLM_JOB_FILTER_BATCH_MAX]
             outs = llm_process_jobs_batch(batch, scene_id=scene_id)
-            # 防御：模型或异常导致 outs 长度不一致时，确保每个 job 都能落库
             for j, job in enumerate(batch):
                 out = outs[j] if isinstance(outs, list) and j < len(outs) else {}
                 write_to_csv(job, out, scene_id=scene_id)
+
     out = {
         "code": 200,
         "status": "success",
@@ -115,6 +111,70 @@ async def run_crawl_and_ai(
     else:
         out["csv_file"] = cfg.CSV_FILE
     return out
+
+
+# ==========================
+# 接口 5：爬取只写入 SQLite
+# ==========================
+@handle_api_exception_async
+@app.post("/api/crawl_liepin_crawl_only")
+async def crawl_liepin_crawl_only(
+    scene_id: int,
+    reset_checkpoint: Annotated[
+        bool,
+        Query(
+            description="为 True 时清除当前 scene_id 在 checkpoint.json 中的断点，从第 1 页（索引 0）重新爬",
+        ),
+    ] = False,
+):
+    dynamic_jobconfig.set(scene_manager.get_dynamic_jobconfig(scene_id))
+    jobs = await crawl_liepin(scene_id=scene_id, reset_checkpoint=reset_checkpoint)
+    return {
+        "code": 200,
+        "status": "success",
+        "scene_id": scene_id,
+        "job_count": len(jobs),
+        "csv_file": None,
+    }
+
+
+# ==========================
+# 接口 6：从 SQLite 提交 LLM
+# ==========================
+@handle_api_exception_async
+@app.post("/api/submit_llm_for_scene")
+async def submit_llm_for_scene(
+    scene_id: int,
+):
+    dynamic_jobconfig.set(scene_manager.get_dynamic_jobconfig(scene_id))
+    submitted_jobs = get_unprocessed_crawl_list_jobs_for_llm(
+        "liepin",
+        scene_id,
+        match_level_empty_only=True,
+    )
+    if not submitted_jobs:
+        return {
+            "code": 200,
+            "status": "success",
+            "scene_id": scene_id,
+            "job_count": 0,
+            "csv_file": cfg.CSV_FILE,
+        }
+
+    for i in range(0, len(submitted_jobs), LLM_JOB_FILTER_BATCH_MAX):
+        batch = submitted_jobs[i : i + LLM_JOB_FILTER_BATCH_MAX]
+        outs = llm_process_jobs_batch(batch, scene_id=scene_id)
+        for j, job in enumerate(batch):
+            out = outs[j] if isinstance(outs, list) and j < len(outs) else {}
+            write_to_csv(job, out, scene_id=scene_id)
+
+    return {
+        "code": 200,
+        "status": "success",
+        "scene_id": scene_id,
+        "job_count": len(submitted_jobs),
+        "csv_file": cfg.CSV_FILE,
+    }
 
 # ==========================
 # 接口 4：人工反馈 → 更新记忆

@@ -62,7 +62,7 @@ DASHSCOPE_API_KEY = _env_str("DASHSCOPE_API_KEY")
 LLM_CHAT_MODEL = _env_str("LLM_CHAT_MODEL", "qwen-flash")
 LLM_REQUEST_TIMEOUT_MS = _env_int("LLM_REQUEST_TIMEOUT_MS", 120_000)
 # chat.completions 的 max_tokens（结构化/长 JSON 时可调大）
-LLM_MAX_TOKENS = _env_int("LLM_MAX_TOKENS", 2048)
+LLM_MAX_TOKENS = _env_int("LLM_MAX_TOKENS", 6000)
 # AI 生成
 # 生成目的：与 API Key 所属地域一致，华北 2（北京）默认 compatible-mode；VLM / 文本 LLM 共用 dashscope OpenAI 兼容入口
 DASHSCOPE_BASE_HTTP_API_URL = _env_str(

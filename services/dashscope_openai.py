@@ -83,6 +83,21 @@ def chat_completion_text(
         kwargs["response_format"] = response_format
     try:
         completion = client.chat.completions.create(**kwargs)
+        # token 使用统计（若 provider 返回）
+        usage = getattr(completion, "usage", None)
+        if usage is not None:
+            pt = getattr(usage, "prompt_tokens", None)
+            ct = getattr(usage, "completion_tokens", None)
+            tt = getattr(usage, "total_tokens", None)
+            log.debug(
+                "LLM usage: prompt_tokens=%s completion_tokens=%s total_tokens=%s model=%s",
+                pt,
+                ct,
+                tt,
+                m,
+            )
+        else:
+            log.debug("LLM usage: (provider did not return usage) model=%s", m)
         raw = completion.choices[0].message.content
     except Exception as e:
         log.warning("dashscope_openai chat.completions: %s", e)
