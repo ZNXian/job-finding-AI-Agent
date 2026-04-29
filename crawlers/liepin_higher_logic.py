@@ -425,7 +425,12 @@ async def crawl_with_higher_logic(
                 else:
                     job["介绍"] = str((await resolve_job_introduction_text(page, job)) or "").strip()
                 if not job["介绍"]:
-                    continue
+                    #!注意,获取不到岗位详情很可能被风控,停止抓取并返回已收集的岗位数
+                    log.info("风控风险,停止抓取并返回已收集岗位数=%s",len(final_jobs) + len(kept),)
+                    final_jobs.extend(kept)
+                    return final_jobs
+                
+                    # continue
                 job["介绍"] = job["业务方向与规模"] + "\n" + job["介绍"]
                 # 仅在详情页成功提取到“介绍”后写入 SQLite（否则视为不通过，不入库）
                 try:
