@@ -135,14 +135,14 @@ def write_to_csv(
                 hr,
             ]
         )
-    if scene_id is not None and job.get("链接"):
-        # 与 CSV 同步：按 scene+url 回写到列表库
+    if scene_id is not None and job.get("platform_job_id"):
+        # 与 CSV 同步：按 scene+platform_job_id 回写到列表库
         from services.job_store import update_crawl_list_llm_fields
 
         update_crawl_list_llm_fields(
             platform,
             int(scene_id),
-            str(job.get("链接", "")),
+            str(job.get("platform_job_id", "")),
             match_level=match_score,
             reason=reason,
             apply=ap,

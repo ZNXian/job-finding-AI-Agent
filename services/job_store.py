@@ -18,20 +18,20 @@
 # （一）crawl_{platform}.db，表 list_jobs（按平台分库，如 crawl_liepin.db）
 #   · 首写：猎聘等爬虫在【列表页通过硬筛、尚未进详情或详情未跑完前】对每条岗位
 #     upsert_crawl_list_job(platform, scene_id, job_dict)
-#     写入/覆盖：id=md5(scene_id+url)、scene_id、title/company/location/description(列表侧「介绍」)、url、fetch_timestamp；
-#     用于 is_crawl_list_url_present 去重、断点与列表侧快照。INSERT OR REPLACE 会整行替换，未带 hr_greeting 时该列会按库默认回退。
+#     写入/覆盖：id=md5(scene_id+platform+platform_job_id)、scene_id、platform、platform_job_id、
+#     title/company/location/description(列表侧「介绍」)、url(已规范化)、fetch_timestamp；
+#     去重/查询统一按 (platform, platform_job_id, scene_id)。
 #   · 后写：API main 在【LLM 筛选 + write_to_csv 写 HR招呼语 列之后】
-#     utils.files.write_to_csv 内调用 update_crawl_list_hr_greeting(platform, scene_id, url, hr_greeting)
-#     对「已存在 list_jobs 行」UPDATE hr_greeting；无对应行则无任何插入（需先经列表 upsert）。
+#     utils.files.write_to_csv 内调用 update_crawl_list_llm_fields(platform, scene_id, platform_job_id, ...)
+#     对「已存在 list_jobs 行」UPDATE 结构化字段（match_level/reason/apply/hr_greeting）。
 #
 # （二）jobs.db，表 pending_jobs 与 memory_jobs（岗位「待人工 / 已决策」主库，与列表快照库分离）
-#   · pending_jobs：add_pending_job(job_dict) 在「该 url 的 id 既不在 pending 也不在 memory」时
-#     INSERT 一条元数据（id=md5(url) 仅按链接全局去重，与 list_jobs 主键不同）。
-#     本仓库主流程不强制从爬虫子模块自动写入，供后续待审核队列/其他入口调用；集成测试会主动调用。
-#   · memory_jobs：move_to_memory(job_id, approved|rejected, reason?) 在人工审核/反馈时
-#     从 pending 删除并写入 memory：含 status、reject_reason、reviewed_at；拒绝对象会算拒绝理由的 Embedding
-#     写入 reject_emb（BLOB），供 get_similar_rejected_reasons 做相似「不合适理由」检索（FAISS 在内存、不落盘；该
-#     查询过程中可能对缺向量的历史拒绝行补算 reject_emb 并回写表）。
+#   · pending_jobs：add_pending_job(job_dict) 以 (scene_id, platform, platform_job_id) 作为业务键；
+#     内部 id=md5(scene_id+platform+platform_job_id) 仅作技术主键。
+#   · memory_jobs：move_to_memory(scene_id, platform, platform_job_id, status, reason?) 在人工审核/反馈时
+#     按三元键从 pending 流转到 memory；含 status、reject_reason、reviewed_at。
+#   · reject_reason 会生成 reject_emb（BLOB），供 get_similar_rejected_reasons 做相似「不合适理由」检索
+#     （FAISS 在内存、不落盘；查询过程中可对缺向量的历史拒绝行补算 reject_emb 并回写表）。
 # —————————————————————————————————————————————————————————————————
 #
 
@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -61,6 +62,7 @@ _lock = threading.RLock()
 
 # 各平台列表爬取快照库（与 pending/memory 的 jobs.db 分离）：{platform: sqlite3.Connection}
 _crawl_conns: Dict[str, sqlite3.Connection] = {}
+_LIEPIN_PLATFORM_JOB_ID_RE = re.compile(r"liepin\.com/.*/(\d+)(?:\D.*)?\??$", re.IGNORECASE)
 
 
 def set_job_store_dir(path: str | None) -> None:
@@ -106,6 +108,15 @@ def _crawl_db_path(platform: str) -> Path:
     return _store_dir() / _crawl_platform_db_filename(platform)
 
 
+def normalize_liepin_link_keep_first_q(url: str) -> str:
+    """只保留到第一个 '?'（包含 '?' 本身）；无 '?' 则返回原链接。"""
+    u = str(url or "").strip()
+    if not u:
+        return ""
+    idx = u.find("?")
+    return u[: idx + 1] if idx >= 0 else u
+
+
 def _ensure_list_jobs_hr_greeting(c: sqlite3.Connection) -> None:
     # AI 生成
     # 生成目的：列表快照表增加与 CSV 同步的「HR 招呼语」
@@ -148,6 +159,27 @@ def _ensure_list_jobs_llm_cols(c: sqlite3.Connection) -> None:
     c.commit()
 
 
+def _ensure_list_jobs_platform_cols(c: sqlite3.Connection) -> None:
+    """列表快照表增加平台字段与平台内岗位ID字段。"""
+    cur = c.execute("PRAGMA table_info(list_jobs)").fetchall()
+    col_names = {r[1] for r in cur} if cur else set()
+    alters: list[str] = []
+    if "platform" not in col_names:
+        alters.append("ALTER TABLE list_jobs ADD COLUMN platform TEXT NOT NULL DEFAULT 'liepin'")
+    if "platform_job_id" not in col_names:
+        alters.append("ALTER TABLE list_jobs ADD COLUMN platform_job_id TEXT NOT NULL DEFAULT ''")
+    for sql in alters:
+        c.execute(sql)
+    c.execute("DROP INDEX IF EXISTS idx_list_jobs_scene_url")
+    c.execute("DROP INDEX IF EXISTS idx_list_jobs_scene_platform_job_id")
+    c.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_list_jobs_platform_pid_scene
+           ON list_jobs(platform, platform_job_id, scene_id)
+           WHERE length(platform_job_id) > 0"""
+    )
+    c.commit()
+
+
 def _get_crawl_conn(platform: str) -> sqlite3.Connection:
     global _crawl_conns
     key = (platform or "unknown").strip().lower() or "unknown"
@@ -163,6 +195,8 @@ def _get_crawl_conn(platform: str) -> sqlite3.Connection:
                 CREATE TABLE IF NOT EXISTS list_jobs (
                     id TEXT PRIMARY KEY,
                     scene_id INTEGER NOT NULL,
+                    platform TEXT NOT NULL DEFAULT 'liepin',
+                    platform_job_id TEXT NOT NULL DEFAULT '',
                     title TEXT NOT NULL DEFAULT '',
                     company TEXT NOT NULL DEFAULT '',
                     location TEXT NOT NULL DEFAULT '',
@@ -170,31 +204,32 @@ def _get_crawl_conn(platform: str) -> sqlite3.Connection:
                     url TEXT NOT NULL DEFAULT '',
                     fetch_timestamp TEXT NOT NULL DEFAULT ''
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_list_jobs_scene_url
-                    ON list_jobs(scene_id, url);
                 """
             )
             _ensure_list_jobs_hr_greeting(c)
             _ensure_list_jobs_llm_cols(c)
+            _ensure_list_jobs_platform_cols(c)
             c.commit()
             _crawl_conns[key] = c
         return _crawl_conns[key]
 
 
 def update_crawl_list_hr_greeting(
-    platform: str, scene_id: int, url: str, hr_greeting: str
+    platform: str, scene_id: int, url_or_platform_job_id: str, hr_greeting: str
 ) -> None:
     # AI 生成
-    # 生成目的：在列表爬取表上按 scene_id+url 回写与 CSV 一致的招呼语
-    u = (url or "").strip()
-    if not u:
+    # 生成目的：在列表爬取表上按 scene_id+platform+platform_job_id 回写与 CSV 一致的招呼语
+    pid = resolve_liepin_platform_job_id(url_or_platform_job_id)
+    if not pid:
         return
     conn = _get_crawl_conn(platform)
     with _lock:
         _ensure_list_jobs_hr_greeting(conn)
+        _ensure_list_jobs_platform_cols(conn)
+        platform_name = str(platform or "").strip().lower() or "liepin"
         conn.execute(
-            "UPDATE list_jobs SET hr_greeting = ? WHERE scene_id = ? AND url = ?",
-            (hr_greeting or "", int(scene_id), u),
+            "UPDATE list_jobs SET hr_greeting = ? WHERE platform = ? AND platform_job_id = ? AND scene_id = ?",
+            (hr_greeting or "", platform_name, pid, int(scene_id)),
         )
         conn.commit()
 
@@ -202,68 +237,91 @@ def update_crawl_list_hr_greeting(
 def update_crawl_list_llm_fields(
     platform: str,
     scene_id: int,
-    url: str,
+    url_or_platform_job_id: str,
     *,
     match_level: str = "",
     reason: str = "",
     apply: str = "",
     hr_greeting: str = "",
 ) -> None:
-    """LLM 完成后回写 list_jobs 的结构化筛选列与招呼语（按 scene_id+url）。"""
-    u = (url or "").strip()
-    if not u:
+    """LLM 完成后回写 list_jobs 的结构化筛选列与招呼语（按 scene_id+platform+platform_job_id）。"""
+    pid = resolve_liepin_platform_job_id(url_or_platform_job_id)
+    if not pid:
         return
     conn = _get_crawl_conn(platform)
     with _lock:
         _ensure_list_jobs_hr_greeting(conn)
         _ensure_list_jobs_llm_cols(conn)
+        _ensure_list_jobs_platform_cols(conn)
+        platform_name = str(platform or "").strip().lower() or "liepin"
         conn.execute(
             "UPDATE list_jobs SET match_level = ?, reason = ?, apply = ?, hr_greeting = ? "
-            "WHERE scene_id = ? AND url = ?",
+            "WHERE platform = ? AND platform_job_id = ? AND scene_id = ?",
             (
                 str(match_level or ""),
                 str(reason or ""),
                 str(apply or ""),
                 str(hr_greeting or ""),
+                platform_name,
+                pid,
                 int(scene_id),
-                u,
             ),
         )
         conn.commit()
 
 def update_crawl_list_description(
-    platform: str, scene_id: int, url: str, description: str
+    platform: str, scene_id: int, url_or_platform_job_id: str, description: str
 ) -> None:
-    """详情阶段回写 list_jobs.description（避免 INSERT OR REPLACE 覆盖 hr_greeting）。"""
-    u = (url or "").strip()
-    if not u:
+    """详情阶段回写 list_jobs.description（按 scene_id+platform+platform_job_id）。"""
+    pid = resolve_liepin_platform_job_id(url_or_platform_job_id)
+    if not pid:
         return
     conn = _get_crawl_conn(platform)
     with _lock:
+        platform_name = str(platform or "").strip().lower() or "liepin"
         conn.execute(
-            "UPDATE list_jobs SET description = ? WHERE scene_id = ? AND url = ?",
-            (str(description or ""), int(scene_id), u),
+            "UPDATE list_jobs SET description = ? WHERE platform = ? AND platform_job_id = ? AND scene_id = ?",
+            (str(description or ""), platform_name, pid, int(scene_id)),
         )
         conn.commit()
 
 
-def crawl_list_row_id(scene_id: int, url: str) -> str:
-    """列表爬取行主键：同平台库内按 scene_id + url 唯一。"""
-    normalized = f"{int(scene_id)}\0{(url or '').strip()}"
+def extract_liepin_platform_job_id(url: str) -> str:
+    link = normalize_liepin_link_keep_first_q(url)
+    m = _LIEPIN_PLATFORM_JOB_ID_RE.search(link)
+    return str(m.group(1)) if m else ""
+
+
+def resolve_liepin_platform_job_id(url_or_platform_job_id: str) -> str:
+    raw = str(url_or_platform_job_id or "").strip()
+    if not raw:
+        return ""
+    if raw.isdigit():
+        return raw
+    return extract_liepin_platform_job_id(raw)
+
+
+def crawl_list_row_id(platform: str, scene_id: int, platform_job_id: str) -> str:
+    """列表爬取行主键：同平台库内按 platform + platform_job_id + scene_id 唯一。"""
+    normalized = f"{(platform or '').strip().lower()}\0{(platform_job_id or '').strip()}\0{int(scene_id)}"
     return hashlib.md5(normalized.encode("utf-8")).hexdigest()
 
 
 def _job_dict_from_liepin_list(job_dict: Dict[str, Any]) -> Dict[str, str]:
+    platform = str(job_dict.get("platform") or job_dict.get("platform_code", "liepin")).strip() or "liepin"
+    platform_job_id = str(job_dict.get("platform_job_id") or "").strip()
     title = str(job_dict.get("标题") or job_dict.get("title", "")).strip()
     company = str(job_dict.get("公司") or job_dict.get("company", "")).strip()
     location = str(job_dict.get("地点") or job_dict.get("location", "")).strip()
     description = str(job_dict.get("介绍") or job_dict.get("description", "")).strip()
-    url = str(job_dict.get("链接") or job_dict.get("url", "")).strip()
+    url = normalize_liepin_link_keep_first_q(str(job_dict.get("链接") or job_dict.get("url", "")).strip())
     ts = job_dict.get("fetch_timestamp")
     if ts is None or str(ts).strip() == "":
         ts = datetime.now(timezone.utc).isoformat()
     fetch_timestamp = str(ts).strip()
     return {
+        "platform": platform,
+        "platform_job_id": platform_job_id,
         "title": title,
         "company": company,
         "location": location,
@@ -273,36 +331,48 @@ def _job_dict_from_liepin_list(job_dict: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
-def is_crawl_list_url_present(platform: str, scene_id: int, url: str) -> bool:
-    """某平台库 + 场景下是否已记录该列表页链接（用于跳过已爬岗位）。"""
-    u = (url or "").strip()
-    if not u:
+def is_crawl_list_platform_job_id_present(platform: str, scene_id: int, platform_job_id: str) -> bool:
+    """某平台库 + 场景下是否已记录该平台岗位ID（按 scene_id+platform+platform_job_id 去重）。"""
+    pid = resolve_liepin_platform_job_id(platform_job_id)
+    if not pid:
         return False
     conn = _get_crawl_conn(platform)
     with _lock:
+        _ensure_list_jobs_platform_cols(conn)
+        platform_name = str(platform or "").strip().lower() or "liepin"
         row = conn.execute(
-            "SELECT 1 FROM list_jobs WHERE scene_id = ? AND url = ? LIMIT 1",
-            (int(scene_id), u),
+            "SELECT 1 FROM list_jobs WHERE platform = ? AND platform_job_id = ? AND scene_id = ? LIMIT 1",
+            (platform_name, pid, int(scene_id)),
         ).fetchone()
         return row is not None
 
 
+def is_crawl_list_url_present(platform: str, scene_id: int, url: str) -> bool:
+    """兼容入口：从 URL 提取平台岗位ID后做去重。"""
+    return is_crawl_list_platform_job_id_present(platform, scene_id, url)
+
+
 def upsert_crawl_list_job(platform: str, scene_id: int, job_dict: Dict[str, Any]) -> None:
-    """列表阶段硬校验通过后写入该平台库（字段与 pending 元数据一致 + scene_id）。"""
+    """列表阶段硬校验通过后写入该平台库（唯一键：scene_id+platform+platform_job_id）。"""
     f = _job_dict_from_liepin_list(job_dict)
+    platform_name = str(f["platform"] or "liepin").strip() or "liepin"
+    platform_job_id = resolve_liepin_platform_job_id(f["platform_job_id"])
     url = f["url"]
-    if not url:
+    if not platform_job_id:
         return
-    jid = crawl_list_row_id(scene_id, url)
+    jid = crawl_list_row_id(platform_name, scene_id, platform_job_id)
     conn = _get_crawl_conn(platform)
     with _lock:
+        _ensure_list_jobs_platform_cols(conn)
         conn.execute(
             """INSERT OR REPLACE INTO list_jobs
-            (id, scene_id, title, company, location, description, url, fetch_timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (id, scene_id, platform, platform_job_id, title, company, location, description, url, fetch_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 jid,
                 int(scene_id),
+                platform_name,
+                platform_job_id,
                 f["title"],
                 f["company"],
                 f["location"],
@@ -335,6 +405,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS pending_jobs (
             id TEXT PRIMARY KEY,
+            scene_id INTEGER NOT NULL,
+            platform TEXT NOT NULL DEFAULT '',
+            platform_job_id TEXT NOT NULL DEFAULT '',
             title TEXT NOT NULL DEFAULT '',
             company TEXT NOT NULL DEFAULT '',
             location TEXT NOT NULL DEFAULT '',
@@ -342,8 +415,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             url TEXT NOT NULL DEFAULT '',
             fetch_timestamp TEXT NOT NULL DEFAULT ''
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_jobs_scene_platform_pid
+            ON pending_jobs(scene_id, platform, platform_job_id);
         CREATE TABLE IF NOT EXISTS memory_jobs (
             id TEXT PRIMARY KEY,
+            scene_id INTEGER NOT NULL,
+            platform TEXT NOT NULL DEFAULT '',
+            platform_job_id TEXT NOT NULL DEFAULT '',
             title TEXT NOT NULL DEFAULT '',
             company TEXT NOT NULL DEFAULT '',
             location TEXT NOT NULL DEFAULT '',
@@ -355,21 +433,27 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             reviewed_at TEXT NOT NULL DEFAULT '',
             reject_emb BLOB
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_jobs_scene_platform_pid
+            ON memory_jobs(scene_id, platform, platform_job_id);
         """
     )
     conn.commit()
 
 
-def job_id_from_url(url: str) -> str:
-    # AI 生成
-    # 生成目的：按 URL 的 md5 作为全局稳定主键
-    normalized = (url or "").strip()
+def pending_memory_row_id(scene_id: int, platform: str, platform_job_id: str) -> str:
+    """pending/memory 内部行主键：scene_id + platform + platform_job_id。"""
+    normalized = f"{int(scene_id)}\0{str(platform or '').strip().lower()}\0{str(platform_job_id or '').strip()}"
     return hashlib.md5(normalized.encode("utf-8")).hexdigest()
 
 
 def _normalize_job_dict(job_dict: Dict[str, Any]) -> Dict[str, str]:
     # AI 生成
     # 生成目的：统一字段名与类型
+    scene_id = int(job_dict.get("scene_id") or 0)
+    platform = str(job_dict.get("platform") or "liepin").strip().lower() or "liepin"
+    platform_job_id = resolve_liepin_platform_job_id(
+        str(job_dict.get("platform_job_id") or job_dict.get("url") or "").strip()
+    )
     title = str(job_dict.get("title", "")).strip()
     company = str(job_dict.get("company", "")).strip()
     location = str(job_dict.get("location", "")).strip()
@@ -380,6 +464,9 @@ def _normalize_job_dict(job_dict: Dict[str, Any]) -> Dict[str, str]:
         ts = datetime.now(timezone.utc).isoformat()
     fetch_timestamp = str(ts).strip()
     return {
+        "scene_id": str(scene_id),
+        "platform": platform,
+        "platform_job_id": platform_job_id,
         "title": title,
         "company": company,
         "location": location,
@@ -430,6 +517,9 @@ def _row_from_sql(row: sqlite3.Row, include_memory: bool) -> Dict[str, Any]:
     # 生成目的：将 SQLite 行转为对外 dict
     out: Dict[str, Any] = {
         "id": row["id"],
+        "scene_id": row["scene_id"],
+        "platform": row["platform"] or "",
+        "platform_job_id": row["platform_job_id"] or "",
         "title": row["title"] or "",
         "company": row["company"] or "",
         "location": row["location"] or "",
@@ -448,20 +538,25 @@ def add_pending_job(job_dict: Dict[str, Any]) -> bool:
     # AI 生成
     # 生成目的：写入 pending；若 id 已在 pending 或 memory 则跳过
     fields = _normalize_job_dict(job_dict)
-    url = fields["url"]
-    if not url:
+    scene_id = int(fields["scene_id"])
+    platform = fields["platform"]
+    platform_job_id = fields["platform_job_id"]
+    if not platform_job_id:
         return False
-    jid = job_id_from_url(url)
-    if is_job_processed(url):
+    jid = pending_memory_row_id(scene_id, platform, platform_job_id)
+    if is_job_processed(scene_id, platform, platform_job_id):
         return False
     conn = _get_conn()
     with _lock:
         cur = conn.execute(
             """INSERT OR IGNORE INTO pending_jobs
-            (id, title, company, location, description, url, fetch_timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (id, scene_id, platform, platform_job_id, title, company, location, description, url, fetch_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 jid,
+                scene_id,
+                platform,
+                platform_job_id,
                 fields["title"],
                 fields["company"],
                 fields["location"],
@@ -496,7 +591,9 @@ def get_pending_jobs(limit: int = 1) -> List[Dict[str, Any]]:
 
 
 def move_to_memory(
-    job_id: str,
+    scene_id: int,
+    platform: str,
+    platform_job_id: str,
     status: Literal["approved", "rejected"],
     reason: Optional[str] = None,
 ) -> bool:
@@ -505,6 +602,12 @@ def move_to_memory(
     if status not in ("approved", "rejected"):
         raise ValueError("status 必须是 approved 或 rejected")
     conn = _get_conn()
+    scene_id_i = int(scene_id)
+    platform_s = str(platform or "").strip().lower() or "liepin"
+    pid = resolve_liepin_platform_job_id(platform_job_id)
+    if not pid:
+        return False
+    row_id = pending_memory_row_id(scene_id_i, platform_s, pid)
     reject_reason = (reason or "").strip() if status == "rejected" else ""
     reviewed_at = datetime.now(timezone.utc).isoformat()
     emb_blob: Optional[bytes] = None
@@ -514,18 +617,25 @@ def move_to_memory(
 
     with _lock:
         prow = conn.execute(
-            "SELECT * FROM pending_jobs WHERE id = ?", (job_id,)
+            "SELECT * FROM pending_jobs WHERE scene_id = ? AND platform = ? AND platform_job_id = ?",
+            (scene_id_i, platform_s, pid),
         ).fetchone()
         if not prow:
             return False
-        conn.execute("DELETE FROM memory_jobs WHERE id = ?", (job_id,))
+        conn.execute(
+            "DELETE FROM memory_jobs WHERE scene_id = ? AND platform = ? AND platform_job_id = ?",
+            (scene_id_i, platform_s, pid),
+        )
         conn.execute(
             """INSERT INTO memory_jobs (
-                id, title, company, location, description, url, fetch_timestamp,
+                id, scene_id, platform, platform_job_id, title, company, location, description, url, fetch_timestamp,
                 status, reject_reason, reviewed_at, reject_emb
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                job_id,
+                row_id,
+                scene_id_i,
+                platform_s,
+                pid,
                 prow["title"],
                 prow["company"],
                 prow["location"],
@@ -538,23 +648,32 @@ def move_to_memory(
                 emb_blob,
             ),
         )
-        conn.execute("DELETE FROM pending_jobs WHERE id = ?", (job_id,))
+        conn.execute(
+            "DELETE FROM pending_jobs WHERE scene_id = ? AND platform = ? AND platform_job_id = ?",
+            (scene_id_i, platform_s, pid),
+        )
         conn.commit()
     return True
 
 
-def is_job_processed(job_url: str) -> bool:
+def is_job_processed(scene_id: int, platform: str, platform_job_id: str) -> bool:
     # AI 生成
-    # 生成目的：URL 对应 id 是否已在 pending 或 memory
-    jid = job_id_from_url(job_url)
+    # 生成目的：三元键对应记录是否已在 pending 或 memory
+    scene_id_i = int(scene_id)
+    platform_s = str(platform or "").strip().lower() or "liepin"
+    pid = resolve_liepin_platform_job_id(platform_job_id)
+    if not pid:
+        return False
     conn = _get_conn()
     with _lock:
         if conn.execute(
-            "SELECT 1 FROM pending_jobs WHERE id = ? LIMIT 1", (jid,)
+            "SELECT 1 FROM pending_jobs WHERE scene_id = ? AND platform = ? AND platform_job_id = ? LIMIT 1",
+            (scene_id_i, platform_s, pid),
         ).fetchone():
             return True
         if conn.execute(
-            "SELECT 1 FROM memory_jobs WHERE id = ? LIMIT 1", (jid,)
+            "SELECT 1 FROM memory_jobs WHERE scene_id = ? AND platform = ? AND platform_job_id = ? LIMIT 1",
+            (scene_id_i, platform_s, pid),
         ).fetchone():
             return True
     return False

@@ -66,48 +66,150 @@ async def random_mouse_move(page) -> None:
 
 
 async def random_scroll(page) -> None:
-    """随机滚动若干次（上下都可能）。"""
+    """随机滚动若干次（上下都可能），鼠标跟随移动。"""
     try:
         times = random.randint(1, 3)
         for _ in range(times):
+            # 决定滚动方向和距离
             dy = random.randint(200, 900) * (1 if random.random() < 0.85 else -1)
+            # 1. 滚动前，获取当前鼠标位置（或随机初始位置）
+            try:
+                current_mouse = await page.evaluate("() => ({ x: window.scrollX + 200, y: window.scrollY + 300 })")
+            except:
+                viewport = page.viewport_size
+                current_mouse = {
+                    'x': random.randint(100, viewport['width'] - 100),
+                    'y': random.randint(100, viewport['height'] - 100)
+                }
+            # 2. 执行滚动
             await page.mouse.wheel(0, dy)
-            await page.wait_for_timeout(int(random.uniform(0.12, 0.35) * 1000))
+            # 3. 鼠标跟随移动（向滚动方向移动一段距离）
+            follow_y = dy + random.randint(-50, 50)  # 跟随滚动距离，加一点随机偏移
+            follow_x = random.randint(-30, 30)       # 轻微水平抖动
+            await page.mouse.move(
+                current_mouse['x'] + follow_x,
+                current_mouse['y'] + follow_y,
+                steps=random.randint(5, 12)
+            )
+            # 4. 滚动后的随机停顿
+            await page.wait_for_timeout(int(random.uniform(0.2, 0.5) * 1000))
     except Exception:
         return
 
 
+# async def random_click_blank(page) -> None:
+#     """随机点击页面空白区域（尽量不点到链接/按钮）。"""
+#     try:
+#         vp = page.viewport_size or {"width": 1280, "height": 720}
+#         w = int(vp.get("width") or 1280)
+#         h = int(vp.get("height") or 720)
+#         x = random.randint(int(w * 0.1), max(int(w * 0.1) + 1, int(w * 0.9)))
+#         y = random.randint(int(h * 0.1), max(int(h * 0.1) + 1, int(h * 0.9)))
+#         await page.mouse.click(x, y, delay=random.randint(20, 80))
+#     except Exception:
+#         return
+
 async def random_click_blank(page) -> None:
-    """随机点击页面空白区域（尽量不点到链接/按钮）。"""
+    """随机点击页面空白区域（确保不点到任何链接/按钮）。"""
     try:
         vp = page.viewport_size or {"width": 1280, "height": 720}
         w = int(vp.get("width") or 1280)
         h = int(vp.get("height") or 720)
-        x = random.randint(int(w * 0.1), max(int(w * 0.1) + 1, int(w * 0.9)))
-        y = random.randint(int(h * 0.1), max(int(h * 0.1) + 1, int(h * 0.9)))
-        await page.mouse.click(x, y, delay=random.randint(20, 80))
+        
+        # 获取页面上所有可点击元素的位置（a, button, [onclick] 等）
+        clickable_bounds = await page.evaluate("""
+            () => {
+                const clickable = document.querySelectorAll('a, button, [onclick], [role="button"], .job-card-pc-container');
+                const bounds = [];
+                clickable.forEach(el => {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        bounds.push({
+                            x1: rect.left,
+                            y1: rect.top,
+                            x2: rect.right,
+                            y2: rect.bottom
+                        });
+                    }
+                });
+                return bounds;
+            }
+        """)
+        
+        # 在空白区域找一个点击点（最多尝试 20 次）
+        for _ in range(20):
+            x = random.randint(int(w * 0.05), int(w * 0.95))
+            y = random.randint(int(h * 0.1), int(h * 0.9))
+
+            # 检查是否与任何可点击元素重叠
+            is_blank = True
+            for bounds in clickable_bounds:
+                if bounds['x1'] <= x <= bounds['x2'] and bounds['y1'] <= y <= bounds['y2']:
+                    is_blank = False
+                    break
+            if is_blank:
+                await page.mouse.click(x, y, delay=random.randint(20, 80))
+                return
+        # 保底：点击 body 的最边缘角落
+        await page.mouse.click(5, 5, delay=random.randint(20, 80))
     except Exception:
         return
 
 
 async def human_behavior(page) -> None:
-    """模拟一组人类行为。"""
-    d1 = random.uniform(1.0, 2.0)
-    await asyncio.sleep(d1)
+    """模拟人类行为（完全随机化版本）"""
     
-    await random_mouse_move(page)
-    await page.wait_for_timeout(int(random.uniform(0.3, 0.8) * 1000))
+    # 1. 偶尔的长休息（5%概率）
+    if random.random() < 0.05:
+        d_long = random.uniform(20.0, 60.0)
+        await asyncio.sleep(d_long)
+        log.debug(f"长休息 {d_long:.1f}秒")
+        return  # 长休息后直接返回，不再执行其他动作
     
-    d2 = random.uniform(1.0, 2.0)
-    await asyncio.sleep(d2)
+    # 2. 随机决定本次要执行的动作数量和顺序
+    actions = []
     
-    await random_scroll(page)
-    await page.wait_for_timeout(int(random.uniform(0.3, 0.8) * 1000))
-    log.debug("页面切换随机等待 %.1f 秒", d1+d2)
+    # 可用的动作列表
+    if random.random() < 0.6:
+        actions.append(("鼠标移动", random_mouse_move))
+    if random.random() < 0.8:
+        actions.append(("滚动", random_scroll))
+    if random.random() < 0.9:
+        actions.append(("空白点击", random_click_blank))
     
-    if random.random() < 0.3:
-        await random_click_blank(page)
-        await page.wait_for_timeout(int(random.uniform(0.2, 0.5) * 1000))
+    # 随机打乱顺序
+    random.shuffle(actions)
+    
+    # 执行动作（1-3个）
+    # for name, action in actions[:random.randint(1, 3)]:
+    for name, action in actions[:]:
+        await action(page)
+        # 动作间随机停顿 0.3-1.5 秒
+        await asyncio.sleep(random.uniform(0.3, 1.5))
+    
+    # 3. 最终随机停顿（0.5-3秒）
+    final_wait = random.uniform(0.5, 3.0)
+    await asyncio.sleep(final_wait)
+    log.debug(f"最终随机停顿 {final_wait:.1f}秒")
+
+
+async def is_trap_job_card(card) -> bool:
+    """判断卡片是否不可见（陷阱卡片）；True 表示应跳过。"""
+    style = ((await card.get_attribute("style")) or "").lower()
+    if "display:none" in style or "display: none" in style:
+        return True
+    if "visibility:hidden" in style or "visibility: hidden" in style:
+        return True
+    try:
+        is_visible = await card.evaluate(
+            """(el) => {
+                const s = window.getComputedStyle(el);
+                return s.display !== 'none' && s.visibility !== 'hidden';
+            }"""
+        )
+        return not bool(is_visible)
+    except Exception:
+        return False
 
 
 async def get_browser(p, headless: bool = False, storage_state: str | None = None):

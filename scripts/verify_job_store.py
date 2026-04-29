@@ -51,10 +51,13 @@ def main() -> int:
         js.reset_collections_for_tests()
         _trace("S04", "reset_collections_for_tests() 返回")
 
-        url = "https://example.com/job/100"
-        jid = js.job_id_from_url(url)
-        _trace("S05", f"job_id_from_url OK, jid={jid[:8]}...")
-        assert len(jid) == 32, "job_id 应为 32 位 md5"
+        url = "https://www.liepin.com/job/100.shtml?"
+        scene_id = 999
+        platform = "liepin"
+        platform_job_id = "100"
+        jid = js.pending_memory_row_id(scene_id, platform, platform_job_id)
+        _trace("S05", f"pending_memory_row_id OK, jid={jid[:8]}...")
+        assert len(jid) == 32, "id 应为 32 位 md5"
 
         job = {
             "title": "Python 开发",
@@ -62,6 +65,9 @@ def main() -> int:
             "location": "上海",
             "description": "负责后端与爬虫系统",
             "url": url,
+            "scene_id": scene_id,
+            "platform": platform,
+            "platform_job_id": platform_job_id,
             "fetch_timestamp": "2026-04-26T00:00:00+00:00",
         }
 
@@ -77,7 +83,7 @@ def main() -> int:
         # AI 生成
         # 生成目的：验证 is_job_processed 在 pending 阶段为 True
         _trace("S10", "is_job_processed 前")
-        assert js.is_job_processed(url) is True
+        assert js.is_job_processed(scene_id, platform, platform_job_id) is True
         _trace("S11", "is_job_processed 返回 True")
 
         _trace("S12", "get_pending_jobs 前")
@@ -86,20 +92,21 @@ def main() -> int:
         assert len(rows) == 1
         assert rows[0]["id"] == jid
         assert rows[0]["url"] == url
+        assert rows[0]["platform_job_id"] == platform_job_id
 
         # AI 生成
         # 生成目的：验证 move_to_memory 后 pending 空、memory 可检索
         _trace("S14", "move_to_memory(approved) 前")
-        assert js.move_to_memory(jid, "approved", reason=None) is True
+        assert js.move_to_memory(scene_id, platform, platform_job_id, "approved", reason=None) is True
         _trace("S15", "move_to_memory(approved) 返回")
         _trace("S16", "get_pending_jobs（应空）前")
         assert js.get_pending_jobs(limit=5) == []
         _trace("S17", "pending 已空")
-        assert js.is_job_processed(url) is True
+        assert js.is_job_processed(scene_id, platform, platform_job_id) is True
         _trace("S18", "is_job_processed 仍为 True")
 
-        url2 = "https://example.com/job/200"
-        jid2 = js.job_id_from_url(url2)
+        url2 = "https://www.liepin.com/job/200.shtml?"
+        platform_job_id2 = "200"
         _trace("S19", "add_pending_job(job2) 前")
         js.add_pending_job(
             {
@@ -108,12 +115,18 @@ def main() -> int:
                 "location": "北京",
                 "description": "业务系统",
                 "url": url2,
+                "scene_id": scene_id,
+                "platform": platform,
+                "platform_job_id": platform_job_id2,
             }
         )
         _trace("S20", "add_pending_job(job2) 返回")
         _trace("S21", "move_to_memory(rejected) 前")
         assert (
-            js.move_to_memory(jid2, "rejected", reason="薪资低于预期，且技术栈偏传统") is True
+            js.move_to_memory(
+                scene_id, platform, platform_job_id2, "rejected", reason="薪资低于预期，且技术栈偏传统"
+            )
+            is True
         )
         _trace("S22", "move_to_memory(rejected) 返回")
 

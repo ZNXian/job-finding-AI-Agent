@@ -77,8 +77,16 @@ def export_db(db_path: Path, out_dir: Path) -> List[Path]:
         for t in tables:
             cur = conn.execute(f'SELECT * FROM "{t}"')
             cols = [d[0] for d in cur.description] if cur.description else []
+            # list_jobs 导出时隐藏内部行主键 id/job_id，只保留业务主键 platform_job_id
+            if t == "list_jobs":
+                keep_idx = [i for i, c in enumerate(cols) if c not in {"id", "job_id"}]
+                out_cols = [cols[i] for i in keep_idx]
+                rows = [[r[i] for i in keep_idx] for r in cur.fetchall()]
+            else:
+                out_cols = cols
+                rows = cur.fetchall()
             out = out_dir / f"{db_path.stem}__{t}.csv"
-            _write_csv(out, cols, cur.fetchall())
+            _write_csv(out, out_cols, rows)
             exported.append(out)
     finally:
         conn.close()
