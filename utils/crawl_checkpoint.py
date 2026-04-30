@@ -2,7 +2,7 @@
 """
 多平台列表爬取断点（checkpoint.json）读写。
 
-猎聘（liepin）场景结构（不兼容仅含 last_page 的旧版）：
+猎聘（liepin）场景结构（不兼容仅含 last_page 的旧版；当前 plan item 含 keyword，旧记录可自动升级）：
 
 {
   "liepin": {
@@ -10,8 +10,9 @@
     "scenes": {
       "7": {
         "plan": [
-          { "city_code": "050140", "pubTime": 30 },
-          { "city_code": "050090", "pubTime": 7 }
+          { "city_code": "050140", "pubTime": 30, "keyword": "Python开发" },
+          { "city_code": "050140", "pubTime": 30, "keyword": "后端开发" },
+          { "city_code": "050090", "pubTime": 7, "keyword": "Python开发" }
         ],
         "segment_index": 0,
         "last_list_page": 3
@@ -20,9 +21,9 @@
   }
 }
 
-- plan: 本场景本次运行所需的全部 (city_code, pubTime) 子任务，顺序与列表爬取一致
+- plan: 本场景本次运行所需的全部 (city_code, pubTime, keyword) 子任务，顺序与列表爬取一致
 - segment_index: 当前断点所在的子任务下标（0 起）
-- last_list_page: 在 segment_index 对应 (city_code, pubTime) 下已完成的最后列表页 0 基下标；若尚未开爬该子任务则为 -1
+- last_list_page: 在 segment_index 对应 (city_code, pubTime, keyword) 下已完成的最后列表页 0 基下标；若尚未开爬该子任务则为 -1
 """
 from __future__ import annotations
 
@@ -55,16 +56,36 @@ def _plan_entries_equal(
             return False
         if int(x.get("pubTime", -1)) != int(y.get("pubTime", -1)):
             return False
+        if str(x.get("keyword", "") or "").strip() != str(y.get("keyword", "") or "").strip():
+            return False
     return True
 
 
 def _plan_entries_is_prefix(old: List[Dict[str, Any]], new: List[Dict[str, Any]]) -> bool:
-    """判断 old 是否为 new 的前缀（city_code/pubTime 均一致，且 old 更短）。"""
+    """判断 old 是否为 new 的前缀（city_code/pubTime/keyword 均一致，且 old 更短）。"""
     if not isinstance(old, list) or not isinstance(new, list):
         return False
     if len(old) == 0 or len(old) > len(new):
         return False
     for x, y in zip(old, new):
+        if not isinstance(x, dict) or not isinstance(y, dict):
+            return False
+        if str(x.get("city_code", "")) != str(y.get("city_code", "")):
+            return False
+        if int(x.get("pubTime", -1)) != int(y.get("pubTime", -1)):
+            return False
+        if str(x.get("keyword", "") or "").strip() != str(y.get("keyword", "") or "").strip():
+            return False
+    return True
+
+
+def _plan_entries_equal_coarse_city_pubtime(
+    a: List[Dict[str, Any]], b: List[Dict[str, Any]]
+) -> bool:
+    """仅按 city_code/pubTime 判断计划是否相等（用于旧断点升级，不考虑 keyword）。"""
+    if not isinstance(a, list) or not isinstance(b, list) or len(a) != len(b):
+        return False
+    for x, y in zip(a, b):
         if not isinstance(x, dict) or not isinstance(y, dict):
             return False
         if str(x.get("city_code", "")) != str(y.get("city_code", "")):
@@ -83,6 +104,7 @@ def _is_valid_liepin_entry(v: Any) -> bool:
     for item in p:
         if not isinstance(item, dict):
             return False
+        # keyword 允许缺失（旧断点会自动升级），但写回时会标准化为字符串
         if "city_code" not in item or "pubTime" not in item:
             return False
     if "segment_index" not in v or "last_list_page" not in v:
@@ -115,6 +137,7 @@ def _normalize_liepin_scenes(scenes_raw: Any) -> Dict[str, Dict[str, Any]]:
                         {
                             "city_code": str(it.get("city_code", "")).strip(),
                             "pubTime": int(it.get("pubTime", 0)),
+                            "keyword": str(it.get("keyword", "") or "").strip(),
                         }
                     )
                 out[sk] = {
@@ -251,11 +274,58 @@ def get_liepin_list_resume(
             except Exception as e:
                 log.warning("自动升级 checkpoint.plan 失败（将继续尝试续爬）: %s", e)
         else:
-            log.info(
-                "断点中 plan 与当前场景构建不一致，从子任务 0 页 0 起: scene_id=%s",
-                scene_id,
-            )
-            return 0, 0
+            # 兼容：旧 checkpoint.plan 不含 keyword 的场景（旧计划仅按 city_code/pubTime 分段）
+            # 将旧 segment_index 映射到新 plan：new_segment_index = old_segment_index * keyword_count（默认对应该城市段的第一个 keyword）
+            old_has_keyword = False
+            if isinstance(saved_plan, list) and saved_plan:
+                try:
+                    old_has_keyword = any(isinstance(it, dict) and "keyword" in it for it in saved_plan)
+                except Exception:
+                    old_has_keyword = False
+            if (not old_has_keyword) and isinstance(saved_plan, list) and isinstance(plan, list) and plan:
+                # new plan 的 keyword_count：取第一个 city+pubTime 组合的连续条数
+                first_city = str(plan[0].get("city_code") or "")
+                first_pub = int(plan[0].get("pubTime", 30) or 30)
+                kw_count = 0
+                for it in plan:
+                    if str(it.get("city_code") or "") == first_city and int(it.get("pubTime", 30) or 30) == first_pub:
+                        kw_count += 1
+                    else:
+                        break
+                kw_count = max(1, kw_count)
+                # 将 new plan 压缩成 coarse 计划与旧计划比较
+                coarse_new: List[Dict[str, Any]] = []
+                i = 0
+                while i < len(plan):
+                    coarse_new.append({"city_code": plan[i].get("city_code"), "pubTime": plan[i].get("pubTime")})
+                    i += kw_count
+                if _plan_entries_equal_coarse_city_pubtime(saved_plan, coarse_new):
+                    seg_keep = int(entry.get("segment_index", 0))
+                    last_keep = int(entry.get("last_list_page", -1))
+                    new_seg = max(0, seg_keep * kw_count)
+                    log.info(
+                        "旧断点 plan 不含 keyword：自动升级到 keyword 版 plan（segment_index %s→%s last_list_page=%s）scene_id=%s",
+                        seg_keep,
+                        new_seg,
+                        last_keep,
+                        scene_id,
+                    )
+                    try:
+                        set_liepin_list_checkpoint(
+                            int(scene_id),
+                            plan,
+                            new_seg,
+                            last_keep,
+                            path=path,
+                        )
+                    except Exception as e:
+                        log.warning("旧断点自动升级失败（将继续尝试续爬）: %s", e)
+                else:
+                    log.info(
+                        "断点中 plan 与当前场景构建不一致，从子任务 0 页 0 起: scene_id=%s",
+                        scene_id,
+                    )
+                    return 0, 0
     seg = int(entry["segment_index"])
     if seg < 0 or seg >= len(plan):
         return 0, 0
@@ -298,6 +368,7 @@ def set_liepin_list_checkpoint(
                 {
                     "city_code": str(it.get("city_code", "")).strip(),
                     "pubTime": int(it.get("pubTime", 0)),
+                    "keyword": str(it.get("keyword", "") or "").strip(),
                 }
             )
     scenes[str(int(scene_id))] = {

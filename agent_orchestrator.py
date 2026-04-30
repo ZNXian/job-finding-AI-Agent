@@ -1,19 +1,28 @@
 # -*- coding: utf-8 -*-
-"""LangGraph 编排：可选「场景准备」→（爬取决策→可选爬取）→ 初筛 → 精筛（后续步骤通过 requests 调本服务）。
+"""LangGraph 编排（规则 Planner 版）：可选「场景准备」→ observe → plan&act 循环 → END。
 
-调用约定（与对话/文档一致，维护者以本仓库代码为准；聊天说明不会自动进入运行时）：
-- user_file_path strip 后非空：先走 prepare_scene（进程内调 scene_prepare；路径支持 txt/md/图/pdf，见 resume_document_ingest），
-  再按序 requests 调本机 /api/liepin_login 等；须先启动 uvicorn；默认基址与 config.PORT 一致（见 config.AGENT_API_BASE_URL）。
-- 不传 user_file_path：必须在初始 state 中带 scene_id，从登录决策起跑。
-- run_pipeline 要求 scene_id 与 user_file_path 二选一；编排图不用百炼做「下一步」分支，条件边为硬编码；
-  百炼/qwen 仅在业务接口与 llm_prepare_scene_decision 等 LLM 调用里使用（见 .env 的 LLM_CHAT_MODEL）。
+该模块的目标不是“固定流水线”，而是让 Agent **基于规则**自行决定本次需要调用哪些接口。
 
-规则决策节点（不使用 LLM）：
-- decide_crawl：根据 SQLite list_jobs（job_count、last_fetch_timestamp）、以及 checkpoint.json 是否存在该 scene 的断点判断是否需要重新爬取。
-  need_crawl=false 时会跳过 /api/crawl_liepin_crawl_only，直接进入标题初筛。
+调用约定（维护者以本仓库代码为准；聊天说明不会自动进入运行时）：
+- `run_pipeline` 要求 `scene_id` 与 `user_file_path`（strip 后）二选一，否则 ValueError。
+- 若传 `user_file_path`：先在进程内执行 `prepare_scene_node`（复用 services.scene_prepare），得到 scene_id 后再进入 planner。
+- 若只传 `scene_id`：直接进入 planner。
 
-环境变量：AGENT_API_BASE_URL（未设置时由 config 按 PORT 生成）、
-AGENT_TIMEOUT_LOGIN_S / AGENT_TIMEOUT_CRAWL_S / AGENT_TIMEOUT_PREFILTER_S / AGENT_TIMEOUT_SUBMIT_S（秒）。
+规则 Planner（不使用 LLM）：
+- 每轮先 `observe_scene_node` 读取“世界状态”（SQLite + checkpoint）：
+  - job_count / last_fetch_timestamp（services.job_store.get_crawl_scene_stats）
+  - pending/unprocessed 计数（services.job_store.get_crawl_scene_match_counts）
+  - 是否存在断点（utils.crawl_checkpoint.has_liepin_scene_checkpoint）
+- 再 `plan_and_act_node` 按规则选择并执行 **一个动作**，然后回到 observe：
+  - crawl: POST /api/crawl_liepin_crawl_only（内部调用带 caller=agent；爬虫自检/恢复登录态）
+  - prefilter: POST /api/prefilter_titles_for_scene（caller=agent）
+  - submit: POST /api/submit_llm_for_scene（caller=agent）
+  - stop: 无需动作则结束
+- 循环步数上限：环境变量 `AGENT_PLANNER_MAX_STEPS`（默认 6），防止异常状态下无限循环。
+
+HTTP 自调用说明：
+- planner 的 act 阶段通过 requests 调本服务（默认基址 config.AGENT_API_BASE_URL，与 PORT 对齐）。
+- 超时（秒）：`AGENT_TIMEOUT_CRAWL_S` / `AGENT_TIMEOUT_PREFILTER_S` / `AGENT_TIMEOUT_SUBMIT_S`。
 """
 from __future__ import annotations
 
@@ -96,6 +105,12 @@ class JobAgentState(TypedDict, total=False):
     login_reason: str
     need_crawl: bool
     crawl_reason: str
+    # 规则 planner
+    planner_step: int
+    planner_max_steps: int
+    planner_action: str
+    planner_reason: str
+    last_action_ok: bool
 
 
 def _fmt_body_for_error(body: Any) -> str:
@@ -230,108 +245,24 @@ def decide_if_need_login_node(state: JobAgentState) -> dict[str, Any]:
 
 
 def build_graph(cfg: AgentHttpConfig) -> Any:
-    def decide_if_need_crawl_node(state: JobAgentState) -> dict[str, Any]:
-        """规则判断是否需要重新爬取（不调用 LLM）。"""
+    def _call_crawl(state: JobAgentState) -> tuple[bool, Any]:
         if state.get("error"):
-            log.info("agent node decide_crawl: skip (prior error)")
-            return {}
-        sid = state.get("scene_id")
-        if sid is None:
-            reason = "缺少 scene_id"
-            log.info("agent node decide_crawl: need_crawl=true reason=%s", reason)
-            return {
-                "need_crawl": True,
-                "crawl_reason": reason,
-                "message": _append_message(state, f"爬取决策: 需要爬取（{reason}）"),
-            }
-        scene_id = int(sid)
-        try:
-            from services.job_store import get_crawl_scene_stats
-            from utils.crawl_checkpoint import has_liepin_scene_checkpoint
-
-            stats = get_crawl_scene_stats(platform="liepin", scene_id=scene_id)
-            job_count = int(stats.get("job_count") or 0)
-            last_ts = str(stats.get("last_fetch_timestamp") or "").strip()
-            has_cp = bool(has_liepin_scene_checkpoint(scene_id))
-        except Exception as e:
-            reason = f"读取爬取统计/断点失败: {e}"
-            log.info("agent node decide_crawl: need_crawl=true reason=%s", reason[:300])
-            return {
-                "need_crawl": True,
-                "crawl_reason": reason,
-                "message": _append_message(state, f"爬取决策: 需要爬取（{reason}）"),
-            }
-
-        reasons: list[str] = []
-        need = False
-        if has_cp:
-            need = True
-            reasons.append("存在断点（未完成/需续爬）")
-        if job_count < 10:
-            need = True
-            reasons.append(f"job_count={job_count} < 10")
-        # last_fetch_timestamp 可能为空或非 ISO；这里用宽松解析：优先 datetime.fromisoformat，失败就按“需要爬”
-        if not last_ts:
-            need = True
-            reasons.append("从未爬取（last_fetch_timestamp 为空）")
-        else:
-            try:
-                from datetime import datetime
-
-                # 兼容 "YYYY-MM-DD HH:MM:SS" 与 ISO
-                ts_norm = last_ts.replace("Z", "+00:00")
-                dt = datetime.fromisoformat(ts_norm)
-                age_h = (datetime.now(dt.tzinfo) - dt).total_seconds() / 3600.0
-                if age_h > 48.0:
-                    need = True
-                    reasons.append(f"距上次爬取 {age_h:.1f} 小时 > 48 小时")
-            except Exception:
-                need = True
-                reasons.append("last_fetch_timestamp 无法解析")
-
-        reason = "；".join(reasons) if reasons else f"数据新且完整（job_count={job_count} last={last_ts}）"
-        log.info("agent node decide_crawl: need_crawl=%s reason=%s", need, reason[:300])
-        frag = "爬取: 将执行" if need else "爬取: 跳过"
-        patch: dict[str, Any] = {
-            "need_crawl": bool(need),
-            "crawl_reason": str(reason),
-            "message": _append_message(state, f"爬取决策: {frag}（{reason}）"),
-        }
-        if not need:
-            patch["crawled"] = True
-        return patch
-
-    def node_crawl(state: JobAgentState) -> dict[str, Any]:
-        if state.get("error"):
-            log.info("agent node crawl: skip (prior error)")
-            return {}
+            return False, {"code": 500, "msg": "prior error"}
         sid = int(state["scene_id"])
         params: dict[str, Any] = {"scene_id": sid, "caller": "agent"}
         if state.get("reset_checkpoint"):
             params["reset_checkpoint"] = True
-        log.info(
-            "agent node crawl: start scene_id=%s reset_checkpoint=%s POST /api/crawl_liepin_crawl_only",
-            sid,
-            params.get("reset_checkpoint", False),
-        )
         ok, body = _post_json(
             cfg,
             "/api/crawl_liepin_crawl_only",
             params=params,
             timeout=cfg.timeout_crawl,
         )
-        frag = "爬取: 成功" if ok else "爬取: 失败"
-        log.info("agent node crawl: done scene_id=%s ok=%s", sid, ok)
-        return {
-            "crawled": ok,
-            "error": None if ok else _fmt_body_for_error(body),
-            "message": _append_message(state, frag),
-        }
+        return ok, body
 
-    def node_prefilter(state: JobAgentState) -> dict[str, Any]:
+    def _call_prefilter(state: JobAgentState) -> tuple[bool, Any]:
         if state.get("error"):
-            log.info("agent node prefilter: skip (prior error)")
-            return {}
+            return False, {"code": 500, "msg": "prior error"}
         sid = int(state["scene_id"])
         params: dict[str, Any] = {"scene_id": sid, "caller": "agent"}
         if state.get("include_company"):
@@ -340,95 +271,224 @@ def build_graph(cfg: AgentHttpConfig) -> Any:
             params["include_location"] = True
         if state.get("include_salary"):
             params["include_salary"] = True
-        log.info(
-            "agent node prefilter: start scene_id=%s include_company=%s include_location=%s include_salary=%s",
-            sid,
-            params.get("include_company", False),
-            params.get("include_location", False),
-            params.get("include_salary", False),
-        )
         ok, body = _post_json(
             cfg,
             "/api/prefilter_titles_for_scene",
             params=params,
             timeout=cfg.timeout_prefilter,
         )
-        frag = "初筛: 成功" if ok else "初筛: 失败"
-        log.info("agent node prefilter: done scene_id=%s ok=%s", sid, ok)
-        return {
-            "prefiltered": ok,
-            "error": None if ok else _fmt_body_for_error(body),
-            "message": _append_message(state, frag),
-        }
+        return ok, body
 
-    def node_submit(state: JobAgentState) -> dict[str, Any]:
+    def _call_submit(state: JobAgentState) -> tuple[bool, Any]:
         if state.get("error"):
-            log.info("agent node submit: skip (prior error)")
-            return {}
+            return False, {"code": 500, "msg": "prior error"}
         sid = int(state["scene_id"])
-        log.info("agent node submit: start scene_id=%s POST /api/submit_llm_for_scene", sid)
         ok, body = _post_json(
             cfg,
             "/api/submit_llm_for_scene",
             params={"scene_id": sid, "caller": "agent"},
             timeout=cfg.timeout_submit,
         )
-        frag = "精筛: 成功" if ok else "精筛: 失败"
-        log.info("agent node submit: done scene_id=%s ok=%s", sid, ok)
+        return ok, body
+
+    def observe_scene_node(state: JobAgentState) -> dict[str, Any]:
+        """规则 planner：观测场景当前状态（不调用 LLM）。"""
+        if state.get("error"):
+            log.info("agent node observe: skip (prior error)")
+            return {}
+        sid = state.get("scene_id")
+        if sid is None:
+            return {
+                "error": "缺少 scene_id（请先完成场景准备或传入 scene_id）",
+                "message": _append_message(state, "observe: 缺少 scene_id"),
+            }
+        scene_id = int(sid)
+        try:
+            from services.job_store import get_crawl_scene_match_counts, get_crawl_scene_stats
+            from utils.crawl_checkpoint import has_liepin_scene_checkpoint
+
+            stats = get_crawl_scene_stats(platform="liepin", scene_id=scene_id)
+            counts = get_crawl_scene_match_counts(platform="liepin", scene_id=scene_id)
+            has_cp = bool(has_liepin_scene_checkpoint(scene_id))
+            job_count = int(stats.get("job_count") or 0)
+            last_ts = str(stats.get("last_fetch_timestamp") or "").strip()
+            pending_count = int(counts.get("pending_count") or 0)
+            unprocessed_count = int(counts.get("unprocessed_count") or 0)
+        except Exception as e:
+            err = f"observe 失败: {e}"
+            return {"error": err, "message": _append_message(state, err)}
+
+        # need_crawl 规则与旧 decide_crawl 一致
+        reasons: list[str] = []
+        need_crawl = False
+        if has_cp:
+            need_crawl = True
+            reasons.append("存在断点")
+        if job_count < 10:
+            need_crawl = True
+            reasons.append(f"job_count={job_count}<10")
+        if not last_ts:
+            need_crawl = True
+            reasons.append("last_fetch_timestamp 为空")
+        else:
+            try:
+                from datetime import datetime
+
+                ts_norm = last_ts.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(ts_norm)
+                age_h = (datetime.now(dt.tzinfo) - dt).total_seconds() / 3600.0
+                if age_h > 48.0:
+                    need_crawl = True
+                    reasons.append(f"距上次爬取 {age_h:.1f}h>48h")
+            except Exception:
+                need_crawl = True
+                reasons.append("last_fetch_timestamp 无法解析")
+        crawl_reason = "；".join(reasons) if reasons else f"数据新且完整（job_count={job_count} last={last_ts}）"
+        msg = (
+            f"observe: job_count={job_count} pending={pending_count} unprocessed={unprocessed_count} "
+            f"checkpoint={has_cp} need_crawl={need_crawl}"
+        )
+        log.info("agent node observe: %s", msg)
         return {
-            "submitted": ok,
+            "need_crawl": bool(need_crawl),
+            "crawl_reason": crawl_reason,
+            "message": _append_message(state, msg),
+            # 将观测值写入 message 即可；真正决策在 act 节点
+        }
+
+    def plan_and_act_node(state: JobAgentState) -> dict[str, Any]:
+        """规则 planner：根据观测选择一个动作并执行一遍（单步）。"""
+        if state.get("error"):
+            log.info("agent node plan_act: skip (prior error)")
+            return {}
+        sid = state.get("scene_id")
+        if sid is None:
+            return {"error": "缺少 scene_id", "message": _append_message(state, "plan_act: 缺少 scene_id")}
+        scene_id = int(sid)
+        step = int(state.get("planner_step") or 0)
+        max_steps = int(state.get("planner_max_steps") or 6)
+        if step >= max_steps:
+            return {
+                "planner_action": "stop",
+                "planner_reason": f"达到最大步数 {max_steps}",
+                "message": _append_message(state, f"planner: stop（达到最大步数 {max_steps}）"),
+            }
+
+        # 重新读取一次 counts，避免仅靠 state（state 里不存 counts，避免污染）
+        try:
+            from services.job_store import get_crawl_scene_match_counts
+            from utils.crawl_checkpoint import has_liepin_scene_checkpoint
+
+            counts = get_crawl_scene_match_counts(platform="liepin", scene_id=scene_id)
+            pending_count = int(counts.get("pending_count") or 0)
+            unprocessed_count = int(counts.get("unprocessed_count") or 0)
+            has_cp = bool(has_liepin_scene_checkpoint(scene_id))
+        except Exception:
+            pending_count = 0
+            unprocessed_count = 0
+            has_cp = False
+
+        need_crawl = bool(state.get("need_crawl"))
+
+        action: Literal["crawl", "prefilter", "submit", "stop"]
+        reason: str
+        if has_cp or need_crawl:
+            action = "crawl"
+            reason = str(state.get("crawl_reason") or "need_crawl")
+        elif unprocessed_count > 0:
+            action = "prefilter"
+            reason = f"unprocessed_count={unprocessed_count} > 0"
+        elif pending_count > 0:
+            action = "submit"
+            reason = f"pending_count={pending_count} > 0"
+        else:
+            action = "stop"
+            reason = "无需要执行的动作"
+
+        log.info("agent node plan_act: step=%s action=%s reason=%s", step, action, reason[:300])
+        if action == "stop":
+            return {
+                "planner_step": step + 1,
+                "planner_action": "stop",
+                "planner_reason": reason,
+                "last_action_ok": True,
+                "message": _append_message(state, f"planner: stop（{reason}）"),
+            }
+
+        if action == "crawl":
+            ok, body = _call_crawl(state)
+            frag = "crawl: ok" if ok else f"crawl: fail { _fmt_body_for_error(body) }"
+            return {
+                "planner_step": step + 1,
+                "planner_action": "crawl",
+                "planner_reason": reason,
+                "last_action_ok": bool(ok),
+                "crawled": bool(ok),
+                "error": None if ok else _fmt_body_for_error(body),
+                "message": _append_message(state, frag),
+            }
+        if action == "prefilter":
+            ok, body = _call_prefilter(state)
+            frag = "prefilter: ok" if ok else f"prefilter: fail { _fmt_body_for_error(body) }"
+            return {
+                "planner_step": step + 1,
+                "planner_action": "prefilter",
+                "planner_reason": reason,
+                "last_action_ok": bool(ok),
+                "prefiltered": bool(ok),
+                "error": None if ok else _fmt_body_for_error(body),
+                "message": _append_message(state, frag),
+            }
+        # submit
+        ok, body = _call_submit(state)
+        frag = "submit: ok" if ok else f"submit: fail { _fmt_body_for_error(body) }"
+        return {
+            "planner_step": step + 1,
+            "planner_action": "submit",
+            "planner_reason": reason,
+            "last_action_ok": bool(ok),
+            "submitted": bool(ok),
             "error": None if ok else _fmt_body_for_error(body),
             "message": _append_message(state, frag),
         }
 
-    def route_entry(state: JobAgentState) -> Literal["prepare", "crawl_decide"]:
+    def route_entry(state: JobAgentState) -> Literal["prepare", "observe"]:
         if (state.get("user_file_path") or "").strip():
             return "prepare"
-        return "crawl_decide"
+        return "observe"
 
-    def route_after_prepare(state: JobAgentState) -> Literal["crawl_decide", "end"]:
-        return "end" if state.get("error") else "crawl_decide"
+    def route_after_prepare(state: JobAgentState) -> Literal["observe", "end"]:
+        return "end" if state.get("error") else "observe"
 
-    def route_after_crawl(state: JobAgentState) -> Literal["prefilter", "end"]:
-        return "end" if state.get("error") else "prefilter"
-
-    def route_after_prefilter(state: JobAgentState) -> Literal["submit", "end"]:
-        return "end" if state.get("error") else "submit"
+    def route_after_act(state: JobAgentState) -> Literal["observe", "end"]:
+        if state.get("error"):
+            return "end"
+        if str(state.get("planner_action") or "") == "stop":
+            return "end"
+        # 继续循环
+        return "observe"
 
     g: StateGraph[JobAgentState] = StateGraph(JobAgentState)
     g.add_node("prepare_scene", prepare_scene_node)
-    g.add_node("decide_crawl", decide_if_need_crawl_node)
-    g.add_node("crawl", node_crawl)
-    g.add_node("prefilter", node_prefilter)
-    g.add_node("submit", node_submit)
+    g.add_node("observe", observe_scene_node)
+    g.add_node("plan_act", plan_and_act_node)
 
     g.add_conditional_edges(
         START,
         route_entry,
-        {"prepare": "prepare_scene", "crawl_decide": "decide_crawl"},
+        {"prepare": "prepare_scene", "observe": "observe"},
     )
     g.add_conditional_edges(
         "prepare_scene",
         route_after_prepare,
-        {"crawl_decide": "decide_crawl", "end": END},
+        {"observe": "observe", "end": END},
     )
-    # 决策：是否需要爬取
+    g.add_edge("observe", "plan_act")
     g.add_conditional_edges(
-        "decide_crawl",
-        lambda s: "crawl" if bool(s.get("need_crawl")) else "prefilter",
-        {"crawl": "crawl", "prefilter": "prefilter"},
+        "plan_act",
+        route_after_act,
+        {"observe": "observe", "end": END},
     )
-    g.add_conditional_edges(
-        "crawl",
-        route_after_crawl,
-        {"prefilter": "prefilter", "end": END},
-    )
-    g.add_conditional_edges(
-        "prefilter",
-        route_after_prefilter,
-        {"submit": "submit", "end": END},
-    )
-    g.add_edge("submit", END)
     return g.compile()
 
 
@@ -461,6 +521,11 @@ def run_pipeline(
         "login_reason": "已移除登录节点（由爬虫内部检查/恢复登录态）",
         "need_crawl": True,
         "crawl_reason": "",
+        "planner_step": 0,
+        "planner_max_steps": int(_env_float("AGENT_PLANNER_MAX_STEPS", 6.0) or 6),
+        "planner_action": "",
+        "planner_reason": "",
+        "last_action_ok": True,
         "error": None,
         "message": "",
         "reset_checkpoint": bool(reset_checkpoint),

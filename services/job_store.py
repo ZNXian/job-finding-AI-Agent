@@ -259,6 +259,48 @@ def get_crawl_scene_stats(
     return {"job_count": jc, "last_fetch_timestamp": ts}
 
 
+def get_crawl_scene_match_counts(
+    *,
+    platform: str,
+    scene_id: int,
+) -> Dict[str, Any]:
+    """返回某平台某场景的匹配度统计：pending/unprocessed/high/mid/low。"""
+    platform_name = str(platform or "").strip().lower() or "liepin"
+    conn = _get_crawl_conn(platform_name)
+    with _lock:
+        _ensure_list_jobs_platform_cols(conn)
+        _ensure_list_jobs_llm_cols(conn)
+        row = conn.execute(
+            """
+            SELECT
+              SUM(CASE WHEN match_level = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+              SUM(CASE WHEN match_level = '' OR match_level IS NULL THEN 1 ELSE 0 END) AS unprocessed_count,
+              SUM(CASE WHEN match_level = '高' THEN 1 ELSE 0 END) AS high_count,
+              SUM(CASE WHEN match_level = '中' THEN 1 ELSE 0 END) AS mid_count,
+              SUM(CASE WHEN match_level = '低' THEN 1 ELSE 0 END) AS low_count
+            FROM list_jobs
+            WHERE scene_id = ?
+              AND platform = ?
+            """,
+            (int(scene_id), platform_name),
+        ).fetchone()
+    if not row:
+        return {
+            "pending_count": 0,
+            "unprocessed_count": 0,
+            "high_count": 0,
+            "mid_count": 0,
+            "low_count": 0,
+        }
+    out: Dict[str, Any] = {}
+    for k in ("pending_count", "unprocessed_count", "high_count", "mid_count", "low_count"):
+        try:
+            out[k] = int(row[k] or 0)
+        except Exception:
+            out[k] = 0
+    return out
+
+
 def get_crawl_list_jobs_by_match_levels(
     *,
     platform: str,

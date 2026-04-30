@@ -83,6 +83,8 @@
       th, td { border-bottom: 1px solid rgba(36,50,77,0.6); padding: 10px 8px; text-align: left; font-size: 13px; vertical-align: top; }
       th { color: var(--muted); font-weight: 900; font-size: 12px; }
       a { color: var(--accent); text-decoration: none; }
+      a.visitedJob { color: rgba(169,182,211,0.9); }
+      tr.visitedRow td { color: rgba(169,182,211,0.95); }
       @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
       code { color: #cfe0ff; }
     </style>
@@ -164,6 +166,7 @@
                 <th>地点</th>
                 <th>匹配度</th>
                 <th>AI是否建议投递</th>
+                <th>打招呼用语</th>
                 <th>抓取时间</th>
                 <th>人工标注不投递原因</th>
               </tr>
@@ -190,6 +193,21 @@
         total: 0,
         inFlight: false,
       };
+
+      const VISITED_KEY = "visited_jobs_scene_" + String(sceneId);
+      function _loadVisited() {
+        try {
+          const raw = localStorage.getItem(VISITED_KEY) || "";
+          const arr = JSON.parse(raw);
+          return Array.isArray(arr) ? new Set(arr.map(String)) : new Set();
+        } catch (_) {
+          return new Set();
+        }
+      }
+      function _saveVisited(set) {
+        try { localStorage.setItem(VISITED_KEY, JSON.stringify(Array.from(set))); } catch (_) {}
+      }
+      const visited = _loadVisited();
 
       function isValidManualReason(s) {
         // 避免误触：只有包含中英文（至少 1 个）才认为有效；纯空格/数字/标点一律无效
@@ -229,7 +247,44 @@
         a.target = "_blank";
         a.rel = "noreferrer";
         a.textContent = job.title || "(无标题)";
+        const pid = String(job.platform_job_id || "");
+        if (pid && visited.has(pid)) a.classList.add("visitedJob");
+        a.addEventListener("click", () => {
+          if (!pid) return;
+          visited.add(pid);
+          _saveVisited(visited);
+          a.classList.add("visitedJob");
+          // 同行变色（更明显）
+          const tr = a.closest("tr");
+          if (tr) tr.classList.add("visitedRow");
+        });
         return a;
+      }
+
+      async function copyText(text) {
+        const t = String(text || "");
+        if (!t) return false;
+        try {
+          await navigator.clipboard.writeText(t);
+          return true;
+        } catch (_) {
+          // fallback
+          try {
+            const ta = document.createElement("textarea");
+            ta.value = t;
+            ta.style.position = "fixed";
+            ta.style.left = "-9999px";
+            ta.style.top = "-9999px";
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            const ok = document.execCommand("copy");
+            document.body.removeChild(ta);
+            return !!ok;
+          } catch (_) {
+            return false;
+          }
+        }
       }
 
       function renderPageInfo() {
@@ -269,8 +324,21 @@
             const td3 = document.createElement("td"); td3.textContent = job.location || "";
             const td4 = document.createElement("td"); td4.textContent = job.match_level || "";
             const td5 = document.createElement("td"); td5.textContent = job.apply || "";
-            const td6 = document.createElement("td"); td6.textContent = job.fetch_timestamp || "";
-            const td7 = document.createElement("td");
+            const td6 = document.createElement("td");
+            const greet = String(job.hr_greeting || "");
+            const btnCopy = document.createElement("button");
+            btnCopy.className = "secondary";
+            btnCopy.textContent = "复制";
+            btnCopy.disabled = !greet;
+            btnCopy.addEventListener("click", async () => {
+              if (!greet) { setStatus("statusJobs", "该岗位暂无打招呼用语", "err"); return; }
+              const ok = await copyText(greet);
+              setStatus("statusJobs", ok ? "已复制打招呼用语" : "复制失败（浏览器权限限制）", ok ? "ok" : "err");
+            });
+            td6.appendChild(btnCopy);
+
+            const td7 = document.createElement("td"); td7.textContent = job.fetch_timestamp || "";
+            const td8 = document.createElement("td");
             const inp = document.createElement("input");
             inp.type = "text";
             inp.placeholder = "输入原因后回车/失焦即标记不投递";
@@ -326,10 +394,13 @@
               }
             });
             inp.addEventListener("blur", submitManualReject);
-            td7.appendChild(inp);
+            td8.appendChild(inp);
 
             tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3); tr.appendChild(td4);
-            tr.appendChild(td5); tr.appendChild(td6); tr.appendChild(td7);
+            // 已访问行整行变色
+            const pid = String(job.platform_job_id || "");
+            if (pid && visited.has(pid)) tr.classList.add("visitedRow");
+            tr.appendChild(td5); tr.appendChild(td6); tr.appendChild(td7); tr.appendChild(td8);
             body.appendChild(tr);
           });
         } catch (e) {

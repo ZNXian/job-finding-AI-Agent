@@ -333,7 +333,14 @@ async def crawl_with_higher_logic(
                 encoded_key=encoded_key,
                 salary_code=salary_code,
             )
-            log.info(f"list_url: {list_url}")
+            log.info(
+                "list_url: city=%s pubTime=%s keyword=%s page=%s url=%s",
+                str(plan[seg_idx].get("city_code") or ""),
+                str(plan[seg_idx].get("pubTime") or ""),
+                str(plan[seg_idx].get("keyword") or ""),
+                current_page,
+                list_url,
+            )
             kept: List[Dict[str, Any]] = []
             try:
                 await page.goto(list_url, timeout=60000, wait_until="domcontentloaded")
@@ -407,17 +414,49 @@ def _init_crawl_runtime(
 ) -> Tuple[int, str, str, List[Dict[str, Any]], int, int, int]:
     """初始化本轮爬取上下文：scene/plan/断点/分页。"""
     crawl_scene_id = int(scene_id) if scene_id is not None else 0
-    encoded_key = urllib.parse.quote(str(getattr(cfg, "SEARCH_KEYWORD", "") or "").strip())
+
+    def _parse_keywords(raw: Any) -> List[str]:
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            items = [str(x).strip() for x in raw if str(x).strip()]
+        else:
+            s = str(raw or "").strip()
+            if not s:
+                return []
+            # 优先按常见分隔符拆分；若无分隔符但包含空格，再按空格拆
+            parts = [p.strip() for p in re.split(r"[，,、]+", s) if p.strip()]
+            if len(parts) <= 1 and " " in s:
+                parts = [p.strip() for p in s.split() if p.strip()]
+            items = parts
+        # 去重（保留顺序），并限制最多 3 个
+        seen: set[str] = set()
+        out: List[str] = []
+        for it in items:
+            if it in seen:
+                continue
+            seen.add(it)
+            out.append(it)
+            if len(out) >= 3:
+                break
+        return out
+
+    keywords = _parse_keywords(getattr(cfg, "SEARCH_KEYWORD", "") or "")
+    if not keywords:
+        # 兜底：保持旧行为（至少有一个 key）
+        kw = str(getattr(cfg, "SEARCH_KEYWORD", "") or "").strip()
+        keywords = [kw] if kw else [""]
+    encoded_key = urllib.parse.quote(str(keywords[0] or "").strip())
     salary_code = str(int(cfg.MIN_SALARY * 12 * 0.1)) + "$" + str(int(cfg.MAX_SALARY * 14 * 0.1))
 
     preferred = getattr(cfg, "PREFERRED_CITIES", None) or []
     if not isinstance(preferred, list):
         preferred = []
     province_name = str(getattr(cfg, "PROVINCE", "") or "").strip()
-    plan: List[Dict[str, Any]] = []
+    base_segments: List[Dict[str, Any]] = []
     preferred_dqs = _dqs_for_pub30([str(x) for x in preferred], province_name) or ["010"]
     for dq in preferred_dqs:
-        plan.append({"city_code": dq, "pubTime": 30})
+        base_segments.append({"city_code": dq, "pubTime": 30})
 
     # ACCEPT_REMOTE=True 时：追加「非偏好城市全集」segment（pubTime=7）
     # 注意：此处以 LIEPIN_CITY_CODE 的 code 为全集，排除 preferred_dqs 中已覆盖的 code。
@@ -428,7 +467,19 @@ def _init_crawl_runtime(
         for code in all_codes:
             if code in seen:
                 continue
-            plan.append({"city_code": code, "pubTime": 7})
+            base_segments.append({"city_code": code, "pubTime": 7})
+
+    # 关键：按 city_segment → keyword 的顺序展开 plan
+    plan: List[Dict[str, Any]] = []
+    for seg in base_segments:
+        for kw in keywords:
+            plan.append(
+                {
+                    "city_code": str(seg.get("city_code") or "").strip(),
+                    "pubTime": int(seg.get("pubTime", 30) or 30),
+                    "keyword": str(kw or "").strip(),
+                }
+            )
 
     seg_idx, list_start = get_liepin_list_resume(crawl_scene_id, plan, reset=reset_checkpoint)
     seg_idx = max(0, min(int(seg_idx), len(plan) - 1))
@@ -445,10 +496,12 @@ def _build_list_url(
 ) -> str:
     city_dq = str(plan_item.get("city_code"))
     pub_time = int(plan_item.get("pubTime", 30))
+    kw = str(plan_item.get("keyword") or "").strip()
+    key_encoded = urllib.parse.quote(kw) if kw else str(encoded_key or "")
     return (
         f"https://www.liepin.com/zhaopin/?city={city_dq}&dq={city_dq}"
         f"&pubTime={pub_time}&currentPage={current_page}&pageSize=40"
-        f"&key={encoded_key}&salaryCode={salary_code}"
+        f"&key={key_encoded}&salaryCode={salary_code}"
     )
 
 

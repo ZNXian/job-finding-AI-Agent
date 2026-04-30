@@ -6,7 +6,7 @@
 
 支持通过本地文件（`txt` / `md` / 简历 `pdf` 或图片 `png` 等，见 `services/resume_document_ingest`）中的自然语言描述，经 LLM 结构化决策**复用或新建**求职场景；接口为 `POST /api/start_from_txt`（Body 传服务器路径）或 `POST /api/start_from_upload`（multipart，单文件上限见 `config.MAX_SCENE_UPLOAD_BYTES`）。
 
-每个场景拥有独立的配置：关键词、目标城市、薪资区间、个人要求；可选 **LangGraph 一键流水线** `POST /api/agent/run`（或异步 `POST /api/agent/run_async`）：可选 `user_file_path` 先做场景准备，再依次调用（爬取决策→可选爬取）→ 标题初筛 → 详情精筛（内部 HTTP 调本服务，默认基址 `config.AGENT_API_BASE_URL`，与 `PORT` 对齐；超时见 `AGENT_TIMEOUT_*`）。登录态由爬虫内部自行检查/恢复（工作流已移除显式 login 节点）。
+每个场景拥有独立的配置：关键词、目标城市、薪资区间、个人要求；可选 **LangGraph 规则 Planner** `POST /api/agent/run`（或异步 `POST /api/agent/run_async`）：可选 `user_file_path` 先做场景准备；随后进入规则 planner 循环（observe→plan&act），按需调用 `crawl_only` / `prefilter` / `submit` 或直接 stop（内部 HTTP 调本服务，默认基址 `config.AGENT_API_BASE_URL`，与 `PORT` 对齐；超时见 `AGENT_TIMEOUT_*`；步数上限见 `AGENT_PLANNER_MAX_STEPS`）。登录态由爬虫内部自行检查/恢复（工作流已移除显式 login 节点）。
 
 目前只支持猎聘；后续可扩展更多招聘平台。
 
@@ -84,7 +84,7 @@ bash：`cp .env.example .env`
 | `openai_API_KEY` / `OPENAI_API_BASE` / `OPENAI_EMBEDDING_MODEL` | 记忆向量嵌入（与 `config` 中默认网关、模型一致） |
 | `MAX_PAGE` | 爬列表最大页数，测试可设为 `1` |
 
-5. **LangGraph** `POST /api/agent/run` 通过 HTTP 回调本服务：可在 `.env` 中设置 `AGENT_API_BASE_URL`（未设置时 `config` 默认为 `http://127.0.0.1:{PORT}`，须与实际监听端口一致）。可选超时（秒）：`AGENT_TIMEOUT_LOGIN_S`、`AGENT_TIMEOUT_CRAWL_S`、`AGENT_TIMEOUT_PREFILTER_S`、`AGENT_TIMEOUT_SUBMIT_S`（见 `agent_orchestrator.py`）。Web 工作台默认使用异步 `POST /api/agent/run_async` + 轮询 `GET /api/agent/task/{task_id}`。
+5. **LangGraph** `POST /api/agent/run` 通过 HTTP 回调本服务：可在 `.env` 中设置 `AGENT_API_BASE_URL`（未设置时 `config` 默认为 `http://127.0.0.1:{PORT}`，须与实际监听端口一致）。可选超时（秒）：`AGENT_TIMEOUT_CRAWL_S`、`AGENT_TIMEOUT_PREFILTER_S`、`AGENT_TIMEOUT_SUBMIT_S`；规则 planner 循环步数上限：`AGENT_PLANNER_MAX_STEPS`（见 `agent_orchestrator.py`）。Web 工作台默认使用异步 `POST /api/agent/run_async` + 轮询 `GET /api/agent/task/{task_id}`。
 
 6. `HOST`、`PORT` 等写在 `config.py` 源码中（默认 `PORT=8000`）；上传单文件大小上限为 `config.MAX_SCENE_UPLOAD_BYTES`，**不从** `.env` 读取。
 
@@ -136,7 +136,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 | `/api/prefilter_titles_for_scene` | 标题初筛写回 SQLite；Query：`scene_id`，`include_*` |
 | `/api/submit_llm_for_scene` | 详情精筛 pending、写 CSV；Query：`scene_id` |
 | `/api/feedback` | 人工反馈后更新记忆；Query：`scene_id` |
-| `/api/agent/run` | LangGraph：`scene_id` 与 `user_file_path`（Query）二选一；可选 `reset_checkpoint`、`include_*`；含“是否爬取”的规则决策，必要时会自动跳过 crawl |
+| `/api/agent/run` | LangGraph 规则 Planner：`scene_id` 与 `user_file_path`（Query）二选一；可选 `reset_checkpoint`、`include_*`；按需调用 crawl_only/prefilter/submit，必要时可直接 stop |
 | `/api/agent/run_async` | 同上，但立即返回 `task_id`；配合 `GET /api/agent/task/{task_id}` 轮询状态 |
 | `/api/agent/task/{task_id}` | 查询异步任务状态：pending/running/success/error，并返回 progress_message/result |
 | `/api/jobs/matched` | **GET**：从 SQLite 查询 `scene_id` 下匹配度为高/中的岗位列表（分页/排序） |
@@ -194,7 +194,7 @@ curl -X POST "http://127.0.0.1:8000/api/prefilter_titles_for_scene?scene_id={您
 
 curl -X POST "http://127.0.0.1:8000/api/submit_llm_for_scene?scene_id={您的scene_id}"
 
-4./api/agent/run LangGraph 一键流水线（**须先启动本服务**；`AGENT_API_BASE_URL` 指向当前端口）。已有 `scene_id`、从登录起跑：
+4./api/agent/run LangGraph 规则 Planner（**须先启动本服务**；`AGENT_API_BASE_URL` 指向当前端口）。已有 `scene_id`，从规则观测开始执行（按需爬取/初筛/精筛）：
 
 curl -X POST "http://127.0.0.1:8000/api/agent/run?scene_id={您的scene_id}"
 
@@ -216,15 +216,9 @@ curl -X POST "http://127.0.0.1:8000/api/agent/run?user_file_path=D:/test_scene1.
 
 # 下个版本优化内容
 
-1.增加通义 Qwen-VL进行VLM 视觉解析
+1.更多招聘平台支持
 
-2.提示词升级：现在对自然语言的分析还有点笨，应该是我提示词没写好
-
-3.RAG 智能偏好学习：当前记忆架构较基础而且有点蠢，后面会升级
-
-4.更多招聘平台支持
-
-5.目前整个流程不是很流畅，下次会优化得丝滑一点
+2.更智能的决策planner
 
 
 
