@@ -78,6 +78,12 @@ class SceneManager:
         self._save_to_file()
         log.info(f"已保存场景: {new_scene.get('scene_id')}")
 
+    def create_new_scene(self, standard_dict: Dict) -> int:
+        """
+        由已解析的场景 JSON 对象创建新场景（内部复用 update_scene_from_ai）。
+        """
+        return self.update_scene_from_ai(True, json.dumps(standard_dict, ensure_ascii=False))
+
     def update_scene_from_ai(self, is_new: bool, standard_result: Union[str, int]) -> int:
         """
         根据AI输出更新场景

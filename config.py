@@ -44,8 +44,15 @@ def _env_bool(name: str, default: bool = False) -> bool:
 HOST = "0.0.0.0"
 PORT = 8000
 DEBUG = True
+# LangGraph/agent 进程内 requests 回连本机 API：默认环回 + 与 PORT 一致（勿用 HOST=0.0.0.0 作 URL 主机）。
+# 整串可被 .env 的 AGENT_API_BASE_URL 覆盖（例如改端口或指向网关）。
+AGENT_API_BASE_URL = _env_str("AGENT_API_BASE_URL", f"http://127.0.0.1:{PORT}")
+
+
 
 # ========================== 筛选 / 动态配置（敏感项来自 .env，见 .env.example）==========================
+# /api/start_from_upload 单文件大小上限（字节）；代码常量，不从 .env 读取
+MAX_SCENE_UPLOAD_BYTES = 15 * 1024 * 1024
 LOGIN_USERNAME = _env_str("LOGIN_USERNAME")
 LOGIN_PASSWORD = _env_str("LOGIN_PASSWORD")
 # 猎聘 Playwright storage_state（由 scripts/liepin_login_save_state.py 写入；爬虫可加载复用登录态）
@@ -96,7 +103,7 @@ VLM_REQUEST_TIMEOUT_MS = _env_int("VLM_REQUEST_TIMEOUT_MS", 120_000)
 _SCENE_DIR = _CONFIG_DIR / "data"
 _SCENE_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_SCENE_PATH = str(_SCENE_DIR / "SCENE.json")
-SCENE_MAX_NUMBER = 3  # 最大场景数量
+SCENE_MAX_NUMBER = 99  # 最大场景数量
 REMOTE_KEYWORDS = ["远程", "居家", "灵活", "异地"]
 # ========================== 搜索页面数,测试时控制爬虫量 ==========================
 MAX_PAGE = _env_int("MAX_PAGE", 1)

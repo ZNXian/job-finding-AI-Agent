@@ -7,7 +7,7 @@
 fastapi==0.136.1
 uvicorn==0.46.0
 playwright==1.58.0
-# Playwright stealth（社区维护），用于降低自动化特征
+# Playwright stealth（社区维护），用于降低自动化特征,有import但实际没使用(还没测试效果)
 playwright-stealth==1.0.6
 dashscope==1.25.17
 python-multipart==0.0.26
@@ -15,4 +15,7 @@ faiss-cpu==1.13.2
 numpy==1.26.4
 openai==2.32.0
 python-dotenv==1.2.2
+requests==2.32.5
+langgraph==1.1.9
+pymupdf==1.25.4
 # optional: sentence-transformers (not required for FAISS+SQLite + OpenAI embeddings)

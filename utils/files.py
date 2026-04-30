@@ -32,7 +32,13 @@ def read_and_clean_txt(file_path: str) -> str:
     except Exception as e :
         log.error(f'读入{file_path}失败，原因：{e}')
         return ""
-    
+
+
+def read_txt_file(file_path: str) -> str:
+    """读取并清洗用户 txt（与 read_and_clean_txt 行为一致，供场景准备等模块命名对齐）。"""
+    return read_and_clean_txt(file_path)
+
+
 # AI 生成
 # 生成目的：与 write_to_csv 新表头（含 HR招呼语）一致；老文件缺列时一次性平铺补齐
 _CSV_HEADER_FULL = [

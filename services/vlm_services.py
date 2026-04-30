@@ -15,6 +15,16 @@ from services.dashscope_openai import get_dashscope_openai_client
 
 os.environ["DASHSCOPE_API_KEY"] = (DASHSCOPE_API_KEY or "").strip()
 
+VLM_RESUME_EXTRACT_PROMPT = (
+    "你是简历/履历 OCR 与整理助手。请**仅**根据图片中的文字（含中英文），整理为**一份可读纯文本简历**。\n"
+    "输出**一个** JSON 对象，不要 Markdown 代码块、不要其他说明。结构如下：\n"
+    '{"plain_text":"..."}\n'
+    "要求：\n"
+    "- plain_text 为字符串，保留段落与条列（可用换行）；不要编造图中没有的经历。\n"
+    "- 图中无法辨认处用「（不清晰）」占位，不要留空 JSON。\n"
+    "- 不要输出岗位 JD 五字段结构；这是个人简历图，不是招聘页截图。"
+)
+
 VLM_EXTRACT_USER_TEXT = (
     "你是招聘网站岗位详情分析助手。请**仅**根据图片中的文字内容，"
     "输出**一个** JSON 对象，不要代码块、不要其他说明。结构如下，缺失字段用空字符串或空数组：\n"
@@ -171,6 +181,67 @@ def extract_intro_five_from_image(image_path: Union[str, Path]) -> Dict[str, Any
         log.warning("vlm_services: 五字段均为空")
         return {}
     return d
+
+
+def extract_resume_plain_text_from_image(image_path: Union[str, Path]) -> str:
+    """
+    简历/履历类图片 → 纯文本（JSON.plain_text）。与岗位截图 extract_intro_five_from_image 分流，勿混用 prompt。
+    """
+    p = Path(image_path)
+    if not p.is_file():
+        log.warning("vlm_services: 简历图不存在 %s", image_path)
+        return ""
+    if not (DASHSCOPE_API_KEY or "").strip():
+        log.error("vlm_services: DASHSCOPE_API_KEY 未配置，无法 VLM 解析简历图")
+        return ""
+    client = get_dashscope_openai_client()
+    if client is None:
+        return ""
+    data_url = _data_url_for_local_image(p)
+    min_px = int(getattr(cfg, "VLM_IMAGE_MIN_PIXELS", 32 * 32 * 3) or (32 * 32 * 3))
+    max_px = int(getattr(cfg, "VLM_IMAGE_MAX_PIXELS", 32 * 32 * 8192) or (32 * 32 * 8192))
+    try:
+        completion = client.chat.completions.create(
+            model=_vlm_model_name(),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url},
+                            "min_pixels": min_px,
+                            "max_pixels": max_px,
+                        },
+                        {
+                            "type": "text",
+                            "text": VLM_RESUME_EXTRACT_PROMPT,
+                        },
+                    ],
+                }
+            ],
+        )
+    except Exception as e:
+        log.warning("vlm_services: 简历 VLM chat.completions 异常: %s", e)
+        return ""
+    try:
+        raw = completion.choices[0].message.content
+    except (IndexError, AttributeError) as e:
+        log.warning("vlm_services: 简历 VLM 无 choices: %s", e)
+        return ""
+    if raw is None:
+        return ""
+    raw = str(raw).strip()
+    if not raw:
+        return ""
+    parsed = _parse_vlm_json_payload(raw)
+    if not isinstance(parsed, dict):
+        return ""
+    pt = parsed.get("plain_text")
+    if pt is None:
+        return ""
+    s = str(pt).strip()
+    return s
 
 
 def get_vlm_openai_client():

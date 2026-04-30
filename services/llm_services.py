@@ -96,6 +96,48 @@ _STANDARD_SYSTEM = (
     + STRUCTURED_JSON_ENGINE_RULES
 )
 
+# 场景准备：单次 json_object。维护约定——
+# 1) 运行时只认本常量 + llm_prepare_scene_decision 的校验，不认对话/外部文档的「口头规则」。
+# 2) create_new：new_scene 必填且含 NEW_SCENE_BODY_KEYS；reuse_existing：new_scene 须为 null。
+# 3) 顶层须含 action/scene_id/scene_name/reason/new_scene 五键；代码允许模型多返其它键，但缺键会失败。
+# 4) 模型由 .env 的 LLM_CHAT_MODEL 等决定（如 qwen3.5-flash）；若输出不稳定，优先改 system 或校验策略。
+_PREPARE_SCENE_DECISION_SYSTEM = (
+    "你是求职场景决策引擎。根据用户消息中的【已有场景列表】与【用户需求与简历】，"
+    "只能选择：复用某个已有场景（reuse_existing），或新建完整求职场景（create_new）。\n"
+    "【输出 JSON 顶层必须包含且仅包含以下键】\n"
+    "- action: string，仅能为 reuse_existing 或 create_new\n"
+    "- scene_id: integer 或 null。reuse_existing 且能确定数字 id 时填已有 scene_id，否则 null\n"
+    "- scene_name: string 或 null。若能用简短名称/关键词组合唯一指向某已有场景可填写，否则 null\n"
+    "- reason: string，一句话说明原因（不超过 80 汉字）\n"
+    "- new_scene: object 或 null。仅当 action 为 create_new 时必填；reuse_existing 时必须为 null\n"
+    "\n"
+    "当 new_scene 非 null 时，其必须包含且仅包含以下键（薪资单位 K，与标准场景 JSON 一致）：\n"
+    "- search_keywords: string[]\n"
+    "- city: string 或 string[]\n"
+    "- province: string\n"
+    "- accept_remote: boolean\n"
+    "- min_salary, max_salary: number\n"
+    "- requirements: string[]\n"
+    "\n"
+    "规则：若某已有场景与用户需求高度一致，必须 reuse_existing，并给出正确的 scene_id（优先）或可被区分的 scene_name；"
+    "否则 create_new 并输出完整 new_scene。禁止编造不存在的 scene_id。\n"
+    + STRUCTURED_JSON_ENGINE_RULES
+)
+
+_NEW_SCENE_KEYS = frozenset(
+    {
+        "search_keywords",
+        "city",
+        "province",
+        "accept_remote",
+        "min_salary",
+        "max_salary",
+        "requirements",
+    }
+)
+# 供 scene_prepare 等写入前过滤字段
+NEW_SCENE_BODY_KEYS = _NEW_SCENE_KEYS
+
 
 def _job_info_block(job: Dict[str, Any]) -> str:
     intro = str(job.get("介绍") or job.get("description", "") or "").strip()
@@ -545,3 +587,117 @@ def llm_identify_scene(user_text, scenes):
         response_format={"type": "json_object"},
     )
     return True, standard_result
+
+
+def _scene_list_block_for_prepare(scenes: List[Dict[str, Any]]) -> str:
+    if not scenes:
+        return "(暂无历史场景)"
+    lines: List[str] = []
+    for s in scenes:
+        lines.append(
+            f"场景{s.get('scene_id')}：关键词={s.get('search_keywords')}, 城市={s.get('city')}, "
+            f"省份={s.get('province', '')}, 远程={s.get('accept_remote')}, 薪资={s.get('min_salary')}-{s.get('max_salary')}"
+        )
+    return "\n".join(lines)
+
+
+def _validate_new_scene_subdocument(ns: Dict[str, Any]) -> None:
+    missing = _NEW_SCENE_KEYS - set(ns.keys())
+    if missing:
+        raise ValueError(f"new_scene 缺少键: {missing}")
+    kws = ns.get("search_keywords")
+    if not isinstance(kws, list) or not kws:
+        raise ValueError("new_scene.search_keywords 须为非空数组")
+    req = ns.get("requirements")
+    if not isinstance(req, list):
+        raise ValueError("new_scene.requirements 须为数组")
+    if ns.get("city") is None:
+        raise ValueError("new_scene.city 不能为空")
+    if not isinstance(ns.get("accept_remote"), bool):
+        raise ValueError("new_scene.accept_remote 须为 boolean")
+    try:
+        float(ns.get("min_salary", 0))
+        float(ns.get("max_salary", 0))
+    except (TypeError, ValueError) as e:
+        raise ValueError("new_scene 薪资须为数字") from e
+
+
+def llm_prepare_scene_decision(
+    user_text: str,
+    scenes: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    单次结构化调用：复用已有场景或新建场景。
+    返回 dict：action, scene_id, scene_name, reason, new_scene（与 _PREPARE_SCENE_DECISION_SYSTEM 一致，已做结构校验）。
+
+    异常：用户文本空、JSON 不可解析、缺顶层键、action 非法、与 action 矛盾的字段等，由调用方捕获并写入业务 error。
+    """
+    text = (user_text or "").strip()
+    if not text:
+        raise ValueError("用户文本为空")
+    scene_list = _scene_list_block_for_prepare(scenes)
+    user_block = f"【已有场景列表】\n{scene_list}\n\n【用户需求与简历】\n{text}\n"
+    raw = chat_completion_text(
+        [
+            {"role": "system", "content": _PREPARE_SCENE_DECISION_SYSTEM},
+            {"role": "user", "content": user_block},
+        ],
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+    data = _parse_json_object(raw)
+    if not data:
+        raise ValueError("模型未返回可解析的 JSON")
+    expected_top = {"action", "scene_id", "scene_name", "reason", "new_scene"}
+    missing = expected_top - set(data.keys())
+    if missing:
+        raise ValueError(f"JSON 顶层缺少键: {missing}")
+    action = str(data.get("action") or "").strip()
+    if action not in ("reuse_existing", "create_new"):
+        raise ValueError(f"action 非法: {action!r}")
+    reason = str(data.get("reason") or "").strip()
+    if not reason:
+        raise ValueError("reason 不能为空")
+    sid_raw = data.get("scene_id")
+    scene_id: Optional[int] = None
+    if sid_raw is not None and sid_raw != "":
+        try:
+            scene_id = int(sid_raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError("scene_id 须为整数或 null") from e
+    sn_raw = data.get("scene_name")
+    scene_name: Optional[str] = None
+    if sn_raw is not None and str(sn_raw).strip():
+        scene_name = str(sn_raw).strip()
+    new_scene = data.get("new_scene")
+    if action == "create_new":
+        if new_scene is None or not isinstance(new_scene, dict):
+            raise ValueError("create_new 时 new_scene 须为对象")
+        _validate_new_scene_subdocument(new_scene)
+        if scene_id is not None:
+            raise ValueError("create_new 时 scene_id 应为 null")
+        if scene_name is not None:
+            raise ValueError("create_new 时 scene_name 应为 null")
+        return {
+            "action": action,
+            "scene_id": None,
+            "scene_name": None,
+            "reason": reason,
+            "new_scene": new_scene,
+        }
+    # reuse_existing
+    if new_scene is not None:
+        raise ValueError("reuse_existing 时 new_scene 须为 null")
+    if scene_id is None and not scene_name:
+        raise ValueError("reuse_existing 时须提供 scene_id 或 scene_name")
+    if scene_id is not None:
+        ids = {int(s.get("scene_id", -1)) for s in scenes}
+        if scene_id not in ids:
+            raise ValueError(f"scene_id={scene_id} 不在已有场景中")
+    return {
+        "action": action,
+        "scene_id": scene_id,
+        "scene_name": scene_name,
+        "reason": reason,
+        "new_scene": None,
+    }
