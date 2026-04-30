@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>场景列表</title>
+    <style>
+      :root {
+        --bg: #0b0f19;
+        --panel: #121a2a;
+        --text: #e7eefc;
+        --muted: #a9b6d3;
+        --border: #24324d;
+        --accent: #5aa7ff;
+        --danger: #ff6b6b;
+        --ok: #39d98a;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "PingFang SC",
+          "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+        background: radial-gradient(1200px 600px at 20% 0%, #132449 0%, var(--bg) 60%);
+        color: var(--text);
+      }
+      .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 18px 60px; }
+      .header { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+      .title { font-size: 22px; font-weight: 800; }
+      .subtitle { color: var(--muted); font-size: 13px; }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; align-items: center; }
+      button {
+        background: linear-gradient(180deg, rgba(90,167,255,1) 0%, rgba(49,122,240,1) 100%);
+        border: none;
+        color: white;
+        padding: 10px 12px;
+        border-radius: 12px;
+        font-weight: 800;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button.secondary {
+        background: rgba(9, 13, 22, 0.6);
+        border: 1px solid rgba(36,50,77,0.9);
+        color: var(--text);
+        font-weight: 700;
+      }
+      .status { font-size: 13px; color: var(--muted); }
+      .status.ok { color: var(--ok); }
+      .status.err { color: var(--danger); }
+      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+      @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+      .card {
+        background: rgba(18, 26, 42, 0.92);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 14px;
+      }
+      .cardTop { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
+      .sid { font-size: 16px; font-weight: 900; }
+      .pill {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(36,50,77,0.9);
+        background: rgba(9, 13, 22, 0.65);
+        color: var(--muted);
+        font-size: 12px;
+        cursor: pointer;
+        user-select: none;
+        white-space: nowrap;
+      }
+      .pill:hover { border-color: rgba(90,167,255,0.7); color: var(--text); }
+      .kv { margin-top: 10px; display: grid; grid-template-columns: 110px 1fr; gap: 6px 10px; font-size: 13px; }
+      .k { color: var(--muted); }
+      .v { white-space: pre-wrap; }
+      code { color: #cfe0ff; }
+      a { color: var(--accent); text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="header">
+        <div class="title">场景列表</div>
+        <div class="subtitle">仅展示结构化条目（不包含简历全文）</div>
+      </div>
+      <div class="actions">
+        <button id="btnRefresh">刷新</button>
+        <button class="secondary" id="btnToCreate">去创建页</button>
+        <span id="status" class="status"></span>
+      </div>
+
+      <div id="grid" class="grid"></div>
+    </div>
+
+    <script>
+      function setStatus(msg, kind) {
+        const s = document.getElementById("status");
+        s.textContent = msg || "";
+        s.className = "status" + (kind ? " " + kind : "");
+      }
+
+      function text(v) {
+        if (v === null || v === undefined) return "";
+        if (Array.isArray(v)) return v.map((x) => String(x)).join("、");
+        return String(v);
+      }
+
+      async function loadScenes() {
+        setStatus("加载中…");
+        const r = await fetch("/api/scenes/list");
+        const t = await r.text();
+        let j = null;
+        try { j = JSON.parse(t); } catch (_) {}
+        if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+        if (j?.code && j.code !== 200) throw new Error(j?.msg || "业务失败");
+        return j?.scenes || [];
+      }
+
+      function card(scene) {
+        const c = document.createElement("div");
+        c.className = "card";
+
+        const top = document.createElement("div");
+        top.className = "cardTop";
+
+        const sid = document.createElement("div");
+        sid.className = "sid";
+        sid.textContent = "scene_id=" + text(scene.scene_id);
+
+        const copy = document.createElement("div");
+        copy.className = "pill";
+        copy.textContent = "复制 scene_id";
+        copy.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(String(scene.scene_id));
+            setStatus("已复制 scene_id=" + scene.scene_id, "ok");
+          } catch (e) {
+            setStatus("复制失败（浏览器权限限制）", "err");
+          }
+        });
+
+        top.appendChild(sid);
+        top.appendChild(copy);
+        c.appendChild(top);
+
+        const kv = document.createElement("div");
+        kv.className = "kv";
+        function add(k, v) {
+          const kk = document.createElement("div");
+          kk.className = "k";
+          kk.textContent = k;
+          const vv = document.createElement("div");
+          vv.className = "v";
+          vv.textContent = v;
+          kv.appendChild(kk);
+          kv.appendChild(vv);
+        }
+
+        add("keywords", text(scene.search_keywords));
+        add("city", text(scene.city));
+        add("province", text(scene.province || ""));
+        add("remote", String(!!scene.accept_remote));
+        add("salary(K)", String(scene.min_salary ?? "") + "–" + String(scene.max_salary ?? ""));
+        add("requirements", Array.isArray(scene.requirements) ? scene.requirements.map((x) => "- " + x).join("\n") : text(scene.requirements));
+        add("update_time", text(scene.update_time || ""));
+
+        c.appendChild(kv);
+        return c;
+      }
+
+      async function refresh() {
+        const grid = document.getElementById("grid");
+        grid.innerHTML = "";
+        try {
+          const scenes = await loadScenes();
+          if (!scenes.length) {
+            setStatus("暂无场景。去创建页新增一个。", "ok");
+            const empty = document.createElement("div");
+            empty.className = "card";
+            empty.innerHTML = '暂无场景。<a href=\"/scenes\">去创建页</a>。';
+            grid.appendChild(empty);
+            return;
+          }
+          scenes.forEach((s) => grid.appendChild(card(s)));
+          setStatus("已加载 " + scenes.length + " 个场景", "ok");
+        } catch (e) {
+          setStatus("加载失败：" + (e?.message || String(e)), "err");
+        }
+      }
+
+      document.getElementById("btnRefresh").addEventListener("click", refresh);
+      document.getElementById("btnToCreate").addEventListener("click", () => (location.href = "/scenes"));
+      refresh();
+    </script>
+  </body>
+</html>
+

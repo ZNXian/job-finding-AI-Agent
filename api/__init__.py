@@ -6,8 +6,10 @@
 from fastapi import FastAPI
 
 from api.agent import router as agent_router
+from api.config_ui import router as config_ui_router
 from api.crawl import router as crawl_router
 from api.feedback import router as feedback_router
+from api.jobs import router as jobs_router
 from api.liepin import router as liepin_router
 from api.scenes import router as scenes_router
 
@@ -19,3 +21,5 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(crawl_router, prefix="/api")
     app.include_router(agent_router, prefix="/api")
     app.include_router(feedback_router, prefix="/api")
+    app.include_router(config_ui_router, prefix="/api")
+    app.include_router(jobs_router, prefix="/api")

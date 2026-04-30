@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>工作台</title>
+    <style>
+      :root {
+        --bg: #0b0f19;
+        --panel: #121a2a;
+        --text: #e7eefc;
+        --muted: #a9b6d3;
+        --border: #24324d;
+        --accent: #5aa7ff;
+        --danger: #ff6b6b;
+        --ok: #39d98a;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "PingFang SC",
+          "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+        background: radial-gradient(1200px 600px at 20% 0%, #132449 0%, var(--bg) 60%);
+        color: var(--text);
+      }
+      .topbar {
+        position: sticky;
+        top: 0;
+        background: rgba(11, 15, 25, 0.85);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid rgba(36,50,77,0.6);
+        z-index: 10;
+      }
+      .topbarInner {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 12px 14px;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .brand { font-weight: 900; }
+      .muted { color: var(--muted); font-size: 12px; }
+      .wrap { max-width: 1400px; margin: 0 auto; padding: 14px; }
+      .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .panel { background: rgba(18, 26, 42, 0.92); border: 1px solid var(--border); border-radius: 14px; padding: 14px; overflow: hidden; }
+      .panelHeader { display:flex; gap:10px; align-items:center; justify-content:space-between; }
+      .h { font-size: 15px; font-weight: 900; }
+      .pill {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(36,50,77,0.9);
+        background: rgba(9, 13, 22, 0.65);
+        color: var(--muted);
+        font-size: 12px;
+        cursor: pointer;
+        user-select: none;
+        white-space: nowrap;
+      }
+      .pill:hover { border-color: rgba(90,167,255,0.7); color: var(--text); }
+      textarea {
+        width: 100%;
+        min-height: 180px;
+        resize: vertical;
+        background: rgba(9, 13, 22, 0.85);
+        border: 1px solid rgba(36,50,77,0.9);
+        color: var(--text);
+        padding: 12px;
+        border-radius: 12px;
+        outline: none;
+        font-size: 13px;
+        line-height: 1.5;
+        box-sizing: border-box;
+      }
+      input[type="text"], input[type="number"] {
+        width: 100%;
+        background: rgba(9, 13, 22, 0.85);
+        border: 1px solid rgba(36,50,77,0.9);
+        color: var(--text);
+        padding: 10px 10px;
+        border-radius: 10px;
+        outline: none;
+        font-size: 13px;
+        box-sizing: border-box;
+      }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; align-items:center; }
+      button {
+        background: linear-gradient(180deg, rgba(90,167,255,1) 0%, rgba(49,122,240,1) 100%);
+        border: none;
+        color: white;
+        padding: 10px 12px;
+        border-radius: 12px;
+        font-weight: 900;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button.secondary { background: rgba(9,13,22,0.6); border: 1px solid rgba(36,50,77,0.9); color: var(--text); }
+      .status { font-size: 13px; color: var(--muted); }
+      .status.ok { color: var(--ok); }
+      .status.err { color: var(--danger); }
+      .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } .grid2 { grid-template-columns: 1fr; } }
+      .cards { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-top: 10px; }
+      @media (max-width: 980px) { .cards { grid-template-columns: 1fr; } }
+      .card { border: 1px solid rgba(36,50,77,0.7); border-radius: 12px; padding: 12px; background: rgba(9,13,22,0.35); cursor:pointer; }
+      .card:hover { border-color: rgba(90,167,255,0.7); }
+      .sid { font-weight: 900; }
+      .small { font-size: 12px; color: var(--muted); margin-top: 6px; white-space: pre-wrap; }
+      a { color: var(--accent); text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <div class="topbarInner">
+        <div>
+          <div class="brand">工作台</div>
+          <div class="muted">左侧创建/匹配场景，右侧选择已有场景进入详情</div>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <button id="btnRunAll">手动执行一次agent运行所有场景卡</button>
+          <a class="pill" href="/">返回首页</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="wrap">
+      <div id="layout" class="layout">
+        <div class="panel" id="leftPanel">
+          <div class="panelHeader">
+            <div class="h">输入场景内容（匹配或新建）</div>
+            <span class="pill" id="btnToList">打开列表页</span>
+          </div>
+
+          <div class="muted" style="margin-top:10px;">按默认字段填表（唯一生成入口，可先自动识别回填再编辑）</div>
+          <div class="grid2" style="margin-top:10px;">
+            <div>
+              <div class="muted">关键词 SEARCH_KEYWORD</div>
+              <input id="fKws" type="text" placeholder="后端开发, Python" />
+            </div>
+            <div>
+              <div class="muted">城市 PREFERRED_CITIES</div>
+              <input id="fCities" type="text" placeholder="深圳, 广州" />
+            </div>
+            <div>
+              <div class="muted">远程 ACCEPT_REMOTE</div>
+              <div style="display:flex; gap:12px; align-items:center; margin-top:6px; flex-wrap:wrap;">
+                <label style="display:flex; gap:8px; align-items:center; cursor:pointer; color: var(--text); font-size: 13px;">
+                  <input type="radio" name="acceptRemote" id="fRemoteYes" value="true" />
+                  接受远程工作
+                </label>
+                <label style="display:flex; gap:8px; align-items:center; cursor:pointer; color: var(--text); font-size: 13px;">
+                  <input type="radio" name="acceptRemote" id="fRemoteNo" value="false" checked />
+                  不接受远程工作
+                </label>
+              </div>
+            </div>
+            <div>
+              <div class="muted">薪资(K/月) MIN–MAX</div>
+              <div class="grid2">
+                <input id="fMin" type="number" min="0" step="1" placeholder="1" />
+                <input id="fMax" type="number" min="0" step="1" placeholder="100" />
+              </div>
+            </div>
+          </div>
+          <div class="muted" style="margin-top:10px;">补充说明（可选）</div>
+          <textarea id="fExtra" placeholder="补充：经验年限/技术栈/管理经验/项目亮点…"></textarea>
+          <div class="actions">
+            <button id="btnForm">生成并匹配</button>
+            <button class="secondary" id="btnFormPreview">预览</button>
+            <span id="statusForm" class="status"></span>
+          </div>
+          <pre id="resultForm" class="small"></pre>
+
+          <hr style="border:none;border-top:1px solid rgba(36,50,77,0.6); margin:14px 0;" />
+
+          <div class="muted">粘贴文本（自动识别 → 回填上方表单）</div>
+          <textarea id="pasteText" placeholder="粘贴：求职意向/城市薪资/技能经历…"></textarea>
+          <div class="actions">
+            <button id="btnPaste">自动识别</button>
+            <button class="secondary" id="btnPasteClear">清空</button>
+            <span id="statusPaste" class="status"></span>
+          </div>
+          <pre id="resultPaste" class="small"></pre>
+
+          <hr style="border:none;border-top:1px solid rgba(36,50,77,0.6); margin:14px 0;" />
+
+          <div class="muted">上传 txt/md（自动识别 → 回填上方表单）</div>
+          <input id="uploadFile" type="file" accept=".txt,.md,text/plain,text/markdown" />
+          <div class="actions">
+            <button id="btnUpload">上传并自动识别</button>
+            <span id="statusUpload" class="status"></span>
+          </div>
+          <pre id="resultUpload" class="small"></pre>
+        </div>
+
+        <div class="panel" id="rightPanel">
+          <div class="panelHeader">
+            <div class="h">已有场景（点击进入）</div>
+            <span class="pill" id="btnRefresh">刷新</span>
+          </div>
+          <div id="statusScenes" class="status" style="margin-top:10px;"></div>
+          <div id="cards" class="cards"></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const layout = document.getElementById("layout");
+      document.getElementById("btnToList").addEventListener("click", () => (location.href = "/scenes/list"));
+
+      function setStatus(id, msg, kind) {
+        const el = document.getElementById(id);
+        el.textContent = msg || "";
+        el.className = "status" + (kind ? " " + kind : "");
+      }
+      function showResult(id, obj) {
+        document.getElementById(id).textContent = obj ? JSON.stringify(obj, null, 2) : "";
+      }
+      async function postJson(url, body) {
+        const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const t = await r.text();
+        let j = null; try { j = JSON.parse(t); } catch (_) {}
+        if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+        return j;
+      }
+      function csvSplit(s) { return (s||"").split(/[，,]/).map(x=>x.trim()).filter(Boolean); }
+
+      function setFormFieldsFromRecognized(data) {
+        const d = data || {};
+        const kws = Array.isArray(d.search_keywords) ? d.search_keywords : (d.search_keywords ? [String(d.search_keywords)] : []);
+        const cityVal = d.city;
+        const cities = Array.isArray(cityVal) ? cityVal : (cityVal ? [String(cityVal)] : []);
+        document.getElementById("fKws").value = kws.map(x => String(x).trim()).filter(Boolean).join(", ");
+        document.getElementById("fCities").value = cities.map(x => String(x).trim()).filter(Boolean).join(", ");
+        const ar = !!d.accept_remote;
+        document.getElementById("fRemoteYes").checked = ar;
+        document.getElementById("fRemoteNo").checked = !ar;
+        if (d.min_salary !== undefined && d.min_salary !== null) document.getElementById("fMin").value = String(d.min_salary);
+        if (d.max_salary !== undefined && d.max_salary !== null) document.getElementById("fMax").value = String(d.max_salary);
+        const req = Array.isArray(d.requirements) ? d.requirements : (d.requirements ? [String(d.requirements)] : []);
+        // 回填到“补充说明”里，用户可继续编辑；保留原内容则可自行修改
+        document.getElementById("fExtra").value = req.map(x => String(x).trim()).filter(Boolean).join("\\n");
+        setStatus("statusForm", "已自动识别并回填，可编辑后点击“生成并匹配”创建场景", "ok");
+      }
+      function buildText() {
+        const kws = csvSplit(document.getElementById("fKws").value);
+        const cities = csvSplit(document.getElementById("fCities").value);
+        const remote = (document.querySelector("input[name='acceptRemote']:checked")?.value || "").trim().toLowerCase();
+        const minS = (document.getElementById("fMin").value || "").trim();
+        const maxS = (document.getElementById("fMax").value || "").trim();
+        const extra = (document.getElementById("fExtra").value || "").trim();
+        const lines = [];
+        lines.push("我希望基于以下信息创建或复用求职场景：");
+        lines.push("");
+        if (kws.length) lines.push("关键词：" + kws.join("、"));
+        if (cities.length) lines.push("城市：" + cities.join("、"));
+        if (remote) lines.push("接受远程：" + remote);
+        if (minS || maxS) lines.push("期望薪资（K/月）：" + (minS||"?") + "–" + (maxS||"?"));
+        lines.push("");
+        if (extra) { lines.push("补充说明："); lines.push(extra); lines.push(""); }
+        lines.push("请输出结构化求职场景并判断复用或新建。");
+        return lines.join("\\n");
+      }
+
+      document.getElementById("btnPasteClear").addEventListener("click", () => {
+        document.getElementById("pasteText").value = "";
+        setStatus("statusPaste", "已清空", "ok");
+        showResult("resultPaste", null);
+      });
+      document.getElementById("btnPaste").addEventListener("click", async () => {
+        setStatus("statusPaste", "识别中…");
+        showResult("resultPaste", null);
+        try {
+          const text = (document.getElementById("pasteText").value || "").trim();
+          const res = await postJson("/api/scenes/recognize_fields", { text });
+          if (res.code && res.code !== 200) throw new Error(res.msg || "业务失败");
+          setStatus("statusPaste", "识别完成（已回填表单，未创建场景）", "ok");
+          showResult("resultPaste", res);
+          setFormFieldsFromRecognized(res.data);
+        } catch (e) {
+          setStatus("statusPaste", "失败：" + (e?.message || String(e)), "err");
+        }
+      });
+
+      document.getElementById("btnUpload").addEventListener("click", async () => {
+        setStatus("statusUpload", "识别中…");
+        showResult("resultUpload", null);
+        try {
+          const f = document.getElementById("uploadFile").files?.[0];
+          if (!f) throw new Error("请选择文件");
+          const txt = await f.text();
+          const res = await postJson("/api/scenes/recognize_fields", { text: txt });
+          if (res.code && res.code !== 200) throw new Error(res.msg || "业务失败");
+          setStatus("statusUpload", "识别完成（已回填表单，未创建场景）", "ok");
+          showResult("resultUpload", res);
+          setFormFieldsFromRecognized(res.data);
+        } catch (e) {
+          setStatus("statusUpload", "失败：" + (e?.message || String(e)), "err");
+        }
+      });
+
+      document.getElementById("btnFormPreview").addEventListener("click", () => {
+        showResult("resultForm", { generated_text_preview: buildText() });
+        setStatus("statusForm", "已预览（未提交）", "ok");
+      });
+      document.getElementById("btnForm").addEventListener("click", async () => {
+        setStatus("statusForm", "提交中…");
+        showResult("resultForm", null);
+        try {
+          const res = await postJson("/api/start_from_text", { text: buildText() });
+          setStatus("statusForm", "完成：scene_id=" + res.scene_id, "ok");
+          showResult("resultForm", res);
+          await refreshScenes();
+        } catch (e) {
+          setStatus("statusForm", "失败：" + (e?.message || String(e)), "err");
+        }
+      });
+
+      async function refreshScenes() {
+        const status = document.getElementById("statusScenes");
+        const cards = document.getElementById("cards");
+        status.textContent = "加载中…";
+        cards.innerHTML = "";
+        try {
+          const r = await fetch("/api/scenes/list");
+          const t = await r.text();
+          let j = null; try { j = JSON.parse(t); } catch (_) {}
+          if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+          const scenes = j.scenes || [];
+          if (!scenes.length) {
+            status.textContent = "暂无场景，请在左侧创建。";
+            return;
+          }
+          status.textContent = "共 " + scenes.length + " 个场景";
+          scenes.forEach((s) => {
+            const div = document.createElement("div");
+            div.className = "card";
+            div.innerHTML =
+              '<div class="sid">scene_id=' + s.scene_id + "</div>" +
+              '<div class="small">keywords: ' +
+              (Array.isArray(s.search_keywords) ? s.search_keywords.join("、") : s.search_keywords || "") +
+              "</div>" +
+              '<div class="small">city: ' +
+              (Array.isArray(s.city) ? s.city.join("、") : s.city || "") +
+              " | salary: " +
+              s.min_salary +
+              "–" +
+              s.max_salary +
+              "K</div>" +
+              '<div class="small">update: ' + (s.update_time || "") + "</div>";
+            div.addEventListener("click", () => (location.href = "/workspace/scene/" + s.scene_id));
+            cards.appendChild(div);
+          });
+        } catch (e) {
+          status.textContent = "加载失败：" + (e?.message || String(e));
+        }
+      }
+
+      document.getElementById("btnRefresh").addEventListener("click", refreshScenes);
+      refreshScenes();
+
+      // 单线程依次执行所有 scene（更新时间新优先），每个 scene 等任务完成后再执行下一个
+      let _runAllBusy = false;
+      async function _sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+      async function _postRunAsync(sceneId) {
+        const r = await fetch("/api/agent/run_async?scene_id=" + encodeURIComponent(sceneId), { method: "POST" });
+        const t = await r.text();
+        let j = null; try { j = JSON.parse(t); } catch (_) {}
+        if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+        if (j?.code && j.code !== 200) throw new Error(j?.msg || "业务失败");
+        return j.task_id;
+      }
+
+      async function _getTask(taskId) {
+        const r = await fetch("/api/agent/task/" + encodeURIComponent(taskId));
+        const t = await r.text();
+        let j = null; try { j = JSON.parse(t); } catch (_) {}
+        if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+        if (j?.code && j.code !== 200) throw new Error(j?.msg || "业务失败");
+        return j;
+      }
+
+      function _sceneUpdateKey(s) { return String(s?.update_time || ""); }
+
+      async function runAllScenesOnce() {
+        if (_runAllBusy) return;
+        _runAllBusy = true;
+        const btn = document.getElementById("btnRunAll");
+        const prevText = btn.textContent;
+        btn.textContent = "运行中…";
+        btn.disabled = true;
+        try {
+          const r = await fetch("/api/scenes/list");
+          const t = await r.text();
+          let j = null; try { j = JSON.parse(t); } catch (_) {}
+          if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+          const scenes = (j.scenes || []).slice().sort((a, b) => _sceneUpdateKey(b).localeCompare(_sceneUpdateKey(a)));
+          if (!scenes.length) {
+            alert("暂无场景可运行");
+            return;
+          }
+          for (let i = 0; i < scenes.length; i++) {
+            const sid = scenes[i].scene_id;
+            btn.textContent = "运行中(" + (i + 1) + "/" + scenes.length + ") scene_id=" + sid;
+            let taskId = "";
+            try {
+              taskId = await _postRunAsync(sid);
+            } catch (e) {
+              console.error(e);
+              continue;
+            }
+            // 轮询等待该任务完成
+            while (true) {
+              await _sleep(2000);
+              let st;
+              try {
+                st = await _getTask(taskId);
+              } catch (e) {
+                console.error(e);
+                break;
+              }
+              const status = st.status || "unknown";
+              if (status === "success" || status === "error") break;
+            }
+          }
+          btn.textContent = "已完成（刷新岗位请进场景详情页）";
+          await _sleep(1200);
+        } finally {
+          btn.textContent = prevText;
+          btn.disabled = false;
+          _runAllBusy = false;
+        }
+      }
+
+      document.getElementById("btnRunAll").addEventListener("click", runAllScenesOnce);
+    </script>
+  </body>
+</html>
+

@@ -158,6 +158,21 @@ def load_checkpoint_document(path: Optional[Path] = None) -> Dict[str, Any]:
         return {}
 
 
+def has_liepin_scene_checkpoint(scene_id: int, *, path: Optional[Path] = None) -> bool:
+    """是否存在该 scene_id 的猎聘断点记录（存在即视为需要续爬/未完成）。"""
+    try:
+        root = load_checkpoint_document(path)
+    except Exception:
+        return False
+    block = root.get(_DEFAULT_PLATFORM)
+    if not isinstance(block, dict):
+        return False
+    scenes = block.get(_SCENES_KEY)
+    if not isinstance(scenes, dict):
+        return False
+    return str(int(scene_id)) in scenes
+
+
 def _save_root(root: Dict[str, Any], path: Optional[Path] = None) -> None:
     p = checkpoint_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)

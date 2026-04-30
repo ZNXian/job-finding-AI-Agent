@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
-"""LangGraph 编排：可选「场景准备」→ 登录 → 爬取 → 初筛 → 精筛（后续步骤通过 requests 调本服务）。
+"""LangGraph 编排：可选「场景准备」→（爬取决策→可选爬取）→ 初筛 → 精筛（后续步骤通过 requests 调本服务）。
 
 调用约定（与对话/文档一致，维护者以本仓库代码为准；聊天说明不会自动进入运行时）：
 - user_file_path strip 后非空：先走 prepare_scene（进程内调 scene_prepare；路径支持 txt/md/图/pdf，见 resume_document_ingest），
   再按序 requests 调本机 /api/liepin_login 等；须先启动 uvicorn；默认基址与 config.PORT 一致（见 config.AGENT_API_BASE_URL）。
-- 不传 user_file_path：必须在初始 state 中带 scene_id，从 login 起跑。
+- 不传 user_file_path：必须在初始 state 中带 scene_id，从登录决策起跑。
 - run_pipeline 要求 scene_id 与 user_file_path 二选一；编排图不用百炼做「下一步」分支，条件边为硬编码；
   百炼/qwen 仅在业务接口与 llm_prepare_scene_decision 等 LLM 调用里使用（见 .env 的 LLM_CHAT_MODEL）。
+
+规则决策节点（不使用 LLM）：
+- decide_crawl：根据 SQLite list_jobs（job_count、last_fetch_timestamp）、以及 checkpoint.json 是否存在该 scene 的断点判断是否需要重新爬取。
+  need_crawl=false 时会跳过 /api/crawl_liepin_crawl_only，直接进入标题初筛。
 
 环境变量：AGENT_API_BASE_URL（未设置时由 config 按 PORT 生成）、
 AGENT_TIMEOUT_LOGIN_S / AGENT_TIMEOUT_CRAWL_S / AGENT_TIMEOUT_PREFILTER_S / AGENT_TIMEOUT_SUBMIT_S（秒）。
@@ -15,10 +19,12 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Literal, NotRequired, TypedDict
 
 import config as cfg
+from config import log
 import requests
 from langgraph.graph import END, START, StateGraph
 
@@ -86,6 +92,10 @@ class JobAgentState(TypedDict, total=False):
     include_company: bool
     include_location: bool
     include_salary: bool
+    need_login: bool
+    login_reason: str
+    need_crawl: bool
+    crawl_reason: str
 
 
 def _fmt_body_for_error(body: Any) -> str:
@@ -145,15 +155,19 @@ def _post_json(
 def prepare_scene_node(state: JobAgentState) -> dict[str, Any]:
     # 与 /api/start_from_txt 同源逻辑见 services.scene_prepare；此处不 HTTP 自调用，避免环路与重复开销。
     if state.get("error"):
+        log.info("agent node prepare_scene: skip (prior error)")
         return {}
     path = (state.get("user_file_path") or "").strip()
     if not path:
+        log.info("agent node prepare_scene: skip (empty user_file_path)")
         return {}
     from services.scene_prepare import prepare_scene_from_txt_file
 
+    log.info("agent node prepare_scene: start path=%s", path[:200] + ("..." if len(path) > 200 else ""))
     r = prepare_scene_from_txt_file(path)
     if not r.get("ok"):
         err = str(r.get("error") or "场景准备失败")
+        log.info("agent node prepare_scene: failed error=%s", err[:300])
         return {
             "error": err,
             "message": _append_message(state, f"准备场景: 失败 — {err}"),
@@ -161,38 +175,145 @@ def prepare_scene_node(state: JobAgentState) -> dict[str, Any]:
     sid = int(r["scene_id"])
     reason = str(r.get("reason") or "").strip()
     tail = f"scene_id={sid}" + (f"，{reason}" if reason else "")
+    log.info("agent node prepare_scene: ok scene_id=%s", sid)
     return {
         "scene_id": sid,
         "error": None,
         "message": _append_message(state, f"准备场景: 成功（{tail}）"),
     }
 
+def decide_if_need_login_node(state: JobAgentState) -> dict[str, Any]:
+    """规则判断是否需要重新登录（不调用 LLM）。"""
+    if state.get("error"):
+        log.info("agent node decide_login: skip (prior error)")
+        return {}
+    path = str(getattr(cfg, "LIEPIN_STORAGE_STATE_PATH", "") or "").strip()
+    if not path:
+        reason = "未配置 LIEPIN_STORAGE_STATE_PATH"
+        log.info("agent node decide_login: need_login=true reason=%s", reason)
+        return {
+            "need_login": True,
+            "login_reason": reason,
+            "message": _append_message(state, f"登录决策: 需要登录（{reason}）"),
+        }
+    try:
+        st = os.stat(path)
+        size_ok = st.st_size > 50
+        age_s = max(0.0, time.time() - float(st.st_mtime))
+        age_days = age_s / (24 * 3600)
+        if not size_ok:
+            reason = "storage_state 为空/过小"
+            need = True
+        elif age_s > 2 * 24 * 3600:
+            reason = f"距上次登录态刷新已 {age_days:.1f} 天 > 2 天"
+            need = True
+        else:
+            reason = f"登录态有效（距刷新 {age_days:.1f} 天）"
+            need = False
+    except FileNotFoundError:
+        need = True
+        reason = "storage_state 文件不存在"
+    except Exception as e:
+        need = True
+        reason = f"storage_state 检查失败: {e}"
+    log.info("agent node decide_login: need_login=%s reason=%s", need, reason[:300])
+    frag = "登录: 将执行" if need else "登录: 跳过"
+    # 跳过登录时标记 logged_in=True，表示可复用登录态（爬虫会加载 storage_state）
+    patch: dict[str, Any] = {
+        "need_login": bool(need),
+        "login_reason": str(reason),
+        "message": _append_message(state, f"登录决策: {frag}（{reason}）"),
+    }
+    if not need:
+        patch["logged_in"] = True
+    return patch
+
 
 def build_graph(cfg: AgentHttpConfig) -> Any:
-    def node_login(state: JobAgentState) -> dict[str, Any]:
+    def decide_if_need_crawl_node(state: JobAgentState) -> dict[str, Any]:
+        """规则判断是否需要重新爬取（不调用 LLM）。"""
         if state.get("error"):
+            log.info("agent node decide_crawl: skip (prior error)")
             return {}
         sid = state.get("scene_id")
         if sid is None:
+            reason = "缺少 scene_id"
+            log.info("agent node decide_crawl: need_crawl=true reason=%s", reason)
             return {
-                "error": "缺少 scene_id（请先完成场景准备或传入 scene_id）",
-                "message": _append_message(state, "登录: 跳过（无 scene_id）"),
+                "need_crawl": True,
+                "crawl_reason": reason,
+                "message": _append_message(state, f"爬取决策: 需要爬取（{reason}）"),
             }
-        ok, body = _post_json(cfg, "/api/liepin_login", params={}, timeout=cfg.timeout_login)
-        frag = "登录: 成功" if ok else "登录: 失败"
-        return {
-            "logged_in": ok,
-            "error": None if ok else _fmt_body_for_error(body),
-            "message": _append_message(state, frag),
+        scene_id = int(sid)
+        try:
+            from services.job_store import get_crawl_scene_stats
+            from utils.crawl_checkpoint import has_liepin_scene_checkpoint
+
+            stats = get_crawl_scene_stats(platform="liepin", scene_id=scene_id)
+            job_count = int(stats.get("job_count") or 0)
+            last_ts = str(stats.get("last_fetch_timestamp") or "").strip()
+            has_cp = bool(has_liepin_scene_checkpoint(scene_id))
+        except Exception as e:
+            reason = f"读取爬取统计/断点失败: {e}"
+            log.info("agent node decide_crawl: need_crawl=true reason=%s", reason[:300])
+            return {
+                "need_crawl": True,
+                "crawl_reason": reason,
+                "message": _append_message(state, f"爬取决策: 需要爬取（{reason}）"),
+            }
+
+        reasons: list[str] = []
+        need = False
+        if has_cp:
+            need = True
+            reasons.append("存在断点（未完成/需续爬）")
+        if job_count < 10:
+            need = True
+            reasons.append(f"job_count={job_count} < 10")
+        # last_fetch_timestamp 可能为空或非 ISO；这里用宽松解析：优先 datetime.fromisoformat，失败就按“需要爬”
+        if not last_ts:
+            need = True
+            reasons.append("从未爬取（last_fetch_timestamp 为空）")
+        else:
+            try:
+                from datetime import datetime
+
+                # 兼容 "YYYY-MM-DD HH:MM:SS" 与 ISO
+                ts_norm = last_ts.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(ts_norm)
+                age_h = (datetime.now(dt.tzinfo) - dt).total_seconds() / 3600.0
+                if age_h > 48.0:
+                    need = True
+                    reasons.append(f"距上次爬取 {age_h:.1f} 小时 > 48 小时")
+            except Exception:
+                need = True
+                reasons.append("last_fetch_timestamp 无法解析")
+
+        reason = "；".join(reasons) if reasons else f"数据新且完整（job_count={job_count} last={last_ts}）"
+        log.info("agent node decide_crawl: need_crawl=%s reason=%s", need, reason[:300])
+        frag = "爬取: 将执行" if need else "爬取: 跳过"
+        patch: dict[str, Any] = {
+            "need_crawl": bool(need),
+            "crawl_reason": str(reason),
+            "message": _append_message(state, f"爬取决策: {frag}（{reason}）"),
         }
+        if not need:
+            patch["crawled"] = True
+        return patch
 
     def node_crawl(state: JobAgentState) -> dict[str, Any]:
         if state.get("error"):
+            log.info("agent node crawl: skip (prior error)")
             return {}
         sid = int(state["scene_id"])
-        params: dict[str, Any] = {"scene_id": sid}
+        params: dict[str, Any] = {"scene_id": sid, "caller": "agent"}
         if state.get("reset_checkpoint"):
             params["reset_checkpoint"] = True
+        log.info(
+            "agent node crawl: start scene_id=%s reset_checkpoint=%s POST /api/crawl_liepin_crawl_only",
+            sid,
+            params.get("reset_checkpoint", False),
+        )
         ok, body = _post_json(
             cfg,
             "/api/crawl_liepin_crawl_only",
@@ -200,6 +321,7 @@ def build_graph(cfg: AgentHttpConfig) -> Any:
             timeout=cfg.timeout_crawl,
         )
         frag = "爬取: 成功" if ok else "爬取: 失败"
+        log.info("agent node crawl: done scene_id=%s ok=%s", sid, ok)
         return {
             "crawled": ok,
             "error": None if ok else _fmt_body_for_error(body),
@@ -208,15 +330,23 @@ def build_graph(cfg: AgentHttpConfig) -> Any:
 
     def node_prefilter(state: JobAgentState) -> dict[str, Any]:
         if state.get("error"):
+            log.info("agent node prefilter: skip (prior error)")
             return {}
         sid = int(state["scene_id"])
-        params: dict[str, Any] = {"scene_id": sid}
+        params: dict[str, Any] = {"scene_id": sid, "caller": "agent"}
         if state.get("include_company"):
             params["include_company"] = True
         if state.get("include_location"):
             params["include_location"] = True
         if state.get("include_salary"):
             params["include_salary"] = True
+        log.info(
+            "agent node prefilter: start scene_id=%s include_company=%s include_location=%s include_salary=%s",
+            sid,
+            params.get("include_company", False),
+            params.get("include_location", False),
+            params.get("include_salary", False),
+        )
         ok, body = _post_json(
             cfg,
             "/api/prefilter_titles_for_scene",
@@ -224,6 +354,7 @@ def build_graph(cfg: AgentHttpConfig) -> Any:
             timeout=cfg.timeout_prefilter,
         )
         frag = "初筛: 成功" if ok else "初筛: 失败"
+        log.info("agent node prefilter: done scene_id=%s ok=%s", sid, ok)
         return {
             "prefiltered": ok,
             "error": None if ok else _fmt_body_for_error(body),
@@ -232,31 +363,31 @@ def build_graph(cfg: AgentHttpConfig) -> Any:
 
     def node_submit(state: JobAgentState) -> dict[str, Any]:
         if state.get("error"):
+            log.info("agent node submit: skip (prior error)")
             return {}
         sid = int(state["scene_id"])
+        log.info("agent node submit: start scene_id=%s POST /api/submit_llm_for_scene", sid)
         ok, body = _post_json(
             cfg,
             "/api/submit_llm_for_scene",
-            params={"scene_id": sid},
+            params={"scene_id": sid, "caller": "agent"},
             timeout=cfg.timeout_submit,
         )
         frag = "精筛: 成功" if ok else "精筛: 失败"
+        log.info("agent node submit: done scene_id=%s ok=%s", sid, ok)
         return {
             "submitted": ok,
             "error": None if ok else _fmt_body_for_error(body),
             "message": _append_message(state, frag),
         }
 
-    def route_entry(state: JobAgentState) -> Literal["prepare", "login"]:
+    def route_entry(state: JobAgentState) -> Literal["prepare", "crawl_decide"]:
         if (state.get("user_file_path") or "").strip():
             return "prepare"
-        return "login"
+        return "crawl_decide"
 
-    def route_after_prepare(state: JobAgentState) -> Literal["login", "end"]:
-        return "end" if state.get("error") else "login"
-
-    def route_after_login(state: JobAgentState) -> Literal["crawl", "end"]:
-        return "end" if state.get("error") else "crawl"
+    def route_after_prepare(state: JobAgentState) -> Literal["crawl_decide", "end"]:
+        return "end" if state.get("error") else "crawl_decide"
 
     def route_after_crawl(state: JobAgentState) -> Literal["prefilter", "end"]:
         return "end" if state.get("error") else "prefilter"
@@ -266,7 +397,7 @@ def build_graph(cfg: AgentHttpConfig) -> Any:
 
     g: StateGraph[JobAgentState] = StateGraph(JobAgentState)
     g.add_node("prepare_scene", prepare_scene_node)
-    g.add_node("login", node_login)
+    g.add_node("decide_crawl", decide_if_need_crawl_node)
     g.add_node("crawl", node_crawl)
     g.add_node("prefilter", node_prefilter)
     g.add_node("submit", node_submit)
@@ -274,17 +405,18 @@ def build_graph(cfg: AgentHttpConfig) -> Any:
     g.add_conditional_edges(
         START,
         route_entry,
-        {"prepare": "prepare_scene", "login": "login"},
+        {"prepare": "prepare_scene", "crawl_decide": "decide_crawl"},
     )
     g.add_conditional_edges(
         "prepare_scene",
         route_after_prepare,
-        {"login": "login", "end": END},
+        {"crawl_decide": "decide_crawl", "end": END},
     )
+    # 决策：是否需要爬取
     g.add_conditional_edges(
-        "login",
-        route_after_login,
-        {"crawl": "crawl", "end": END},
+        "decide_crawl",
+        lambda s: "crawl" if bool(s.get("need_crawl")) else "prefilter",
+        {"crawl": "crawl", "prefilter": "prefilter"},
     )
     g.add_conditional_edges(
         "crawl",
@@ -325,6 +457,10 @@ def run_pipeline(
         "crawled": False,
         "prefiltered": False,
         "submitted": False,
+        "need_login": False,
+        "login_reason": "已移除登录节点（由爬虫内部检查/恢复登录态）",
+        "need_crawl": True,
+        "crawl_reason": "",
         "error": None,
         "message": "",
         "reset_checkpoint": bool(reset_checkpoint),

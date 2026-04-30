@@ -86,7 +86,7 @@ _STANDARD_SYSTEM = (
     "你是一个严格的数据格式化引擎。请将用户【求职需求与简历】解析为指定的 JSON 结构（薪资单位：K）。\n"
     "【目标结构说明】\n"
     "必须包含且仅包含以下键：\n"
-    "- search_keywords: string[]，搜索关键词，至多约 8 个\n"
+    "- search_keywords: string[]，搜索关键词，最多 3 个\n"
     "- city: string 或 string[]，期望城市，可多城\n"
     "- province: string，省/自治区/直辖市，无可填空字符串\n"
     "- accept_remote: boolean\n"
@@ -332,7 +332,7 @@ def _call_filter_batch_structured(jobs: List[Dict[str, Any]]) -> List[Dict[str, 
         # 临时调试：
         # 1) 打印 raw 的尾部（避免日志爆量）
         # 2) 判断 raw 是否能被 json.loads 解析，便于定位 structured output 失败原因
-        tail_n = 2000
+        tail_n = 200
         raw_str = raw or ""
         raw_tail = raw_str[-tail_n:].replace("\n", "\\n").replace("\r", "\\r")
         can_load = True
@@ -589,6 +589,54 @@ def llm_identify_scene(user_text, scenes):
     return True, standard_result
 
 
+def llm_extract_scene_fields(user_text: str) -> Dict[str, Any]:
+    """
+    从用户文本中抽取「标准场景字段」JSON（不做复用/新建决策，仅结构化抽取）。
+    返回键：search_keywords, city, province, accept_remote, min_salary, max_salary, requirements
+    """
+    text = str(user_text or "").strip()
+    if not text:
+        raise ValueError("用户文本为空")
+    raw = chat_completion_text(
+        [
+            {"role": "system", "content": _STANDARD_SYSTEM},
+            {"role": "user", "content": text},
+        ],
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+    data = _parse_json_object(raw)
+    if not data:
+        raise ValueError("LLM 输出无法解析为 JSON 对象")
+    missing = {"search_keywords", "city", "province", "accept_remote", "min_salary", "max_salary", "requirements"} - set(
+        data.keys()
+    )
+    if missing:
+        raise ValueError(f"缺少键: {missing}")
+    if not isinstance(data.get("search_keywords"), list) or not data["search_keywords"]:
+        raise ValueError("search_keywords 须为非空数组")
+    # 模型偶尔会超量：在服务端强制最多 3 个
+    data["search_keywords"] = [
+        str(x).strip() for x in (data.get("search_keywords") or []) if str(x).strip()
+    ][:3]
+    if not data["search_keywords"]:
+        raise ValueError("search_keywords 须为非空数组")
+    if data.get("city") is None:
+        raise ValueError("city 不能为空")
+    if not isinstance(data.get("province"), str):
+        raise ValueError("province 须为字符串")
+    if not isinstance(data.get("accept_remote"), bool):
+        raise ValueError("accept_remote 须为 boolean")
+    try:
+        float(data.get("min_salary", 0))
+        float(data.get("max_salary", 0))
+    except (TypeError, ValueError) as e:
+        raise ValueError("min_salary/max_salary 须为数字") from e
+    if not isinstance(data.get("requirements"), list):
+        raise ValueError("requirements 须为数组")
+    return data
+
+
 def _scene_list_block_for_prepare(scenes: List[Dict[str, Any]]) -> str:
     if not scenes:
         return "(暂无历史场景)"
@@ -607,6 +655,10 @@ def _validate_new_scene_subdocument(ns: Dict[str, Any]) -> None:
         raise ValueError(f"new_scene 缺少键: {missing}")
     kws = ns.get("search_keywords")
     if not isinstance(kws, list) or not kws:
+        raise ValueError("new_scene.search_keywords 须为非空数组")
+    # 强制最多 3 个关键词（避免模型超量导致后续搜索范围过大）
+    ns["search_keywords"] = [str(x).strip() for x in kws if str(x).strip()][:3]
+    if not ns["search_keywords"]:
         raise ValueError("new_scene.search_keywords 须为非空数组")
     req = ns.get("requirements")
     if not isinstance(req, list):

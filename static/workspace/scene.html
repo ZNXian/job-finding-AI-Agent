@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>场景详情</title>
+    <style>
+      :root {
+        --bg: #0b0f19;
+        --panel: #121a2a;
+        --text: #e7eefc;
+        --muted: #a9b6d3;
+        --border: #24324d;
+        --accent: #5aa7ff;
+        --danger: #ff6b6b;
+        --ok: #39d98a;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "PingFang SC",
+          "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+        background: radial-gradient(1200px 600px at 20% 0%, #132449 0%, var(--bg) 60%);
+        color: var(--text);
+      }
+      .topbar {
+        position: sticky;
+        top: 0;
+        background: rgba(11, 15, 25, 0.85);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid rgba(36,50,77,0.6);
+        z-index: 10;
+      }
+      .topbarInner {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 12px 14px;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .brand { font-weight: 900; }
+      .muted { color: var(--muted); font-size: 12px; }
+      .wrap { max-width: 1400px; margin: 0 auto; padding: 14px; }
+      .layout { display: grid; grid-template-columns: 360px 1fr; gap: 12px; }
+      .panel { background: rgba(18, 26, 42, 0.92); border: 1px solid var(--border); border-radius: 14px; padding: 14px; overflow: hidden; }
+      .h { font-size: 15px; font-weight: 900; }
+      .pill {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(36,50,77,0.9);
+        background: rgba(9, 13, 22, 0.65);
+        color: var(--muted);
+        font-size: 12px;
+        cursor: pointer;
+        user-select: none;
+        white-space: nowrap;
+      }
+      .pill:hover { border-color: rgba(90,167,255,0.7); color: var(--text); }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; align-items:center; }
+      button {
+        background: linear-gradient(180deg, rgba(90,167,255,1) 0%, rgba(49,122,240,1) 100%);
+        border: none;
+        color: white;
+        padding: 10px 12px;
+        border-radius: 12px;
+        font-weight: 900;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button.secondary { background: rgba(9,13,22,0.6); border: 1px solid rgba(36,50,77,0.9); color: var(--text); }
+      button.scenePrimary {
+        background: linear-gradient(180deg, rgba(57,217,138,1) 0%, rgba(25,170,110,1) 100%);
+      }
+      .status { font-size: 13px; color: var(--muted); }
+      .status.ok { color: var(--ok); }
+      .status.err { color: var(--danger); }
+      .small { font-size: 12px; color: var(--muted); margin-top: 6px; white-space: pre-wrap; }
+      table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+      th, td { border-bottom: 1px solid rgba(36,50,77,0.6); padding: 10px 8px; text-align: left; font-size: 13px; vertical-align: top; }
+      th { color: var(--muted); font-weight: 900; font-size: 12px; }
+      a { color: var(--accent); text-decoration: none; }
+      @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+      code { color: #cfe0ff; }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <div class="topbarInner">
+        <div>
+          <div class="brand">场景详情</div>
+          <div class="muted">查看本场景中/高匹配岗位，支持分页/排序/人工标注</div>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <a class="pill" href="/workspace">返回工作台</a>
+          <a class="pill" href="/">首页</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="wrap">
+      <div class="layout">
+        <div class="panel">
+          <div class="h" id="sceneTitle">scene_id=</div>
+          <div id="sceneInfo" class="small"></div>
+
+          <div id="statusRun" class="status" style="margin-top:10px;"></div>
+
+          <hr style="border:none;border-top:1px solid rgba(36,50,77,0.6); margin:14px 0;" />
+
+          <div class="muted">更新简历/场景文件（仅更新简历，不触发场景匹配）</div>
+          <input id="uploadFile" type="file" />
+          <div class="actions">
+            <button id="btnUpload">上传简历</button>
+            <span id="statusUpload" class="status"></span>
+          </div>
+          <pre id="resultUpload" class="small"></pre>
+
+          <hr style="border:none;border-top:1px solid rgba(36,50,77,0.6); margin:14px 0;" />
+
+          <div class="muted">手动触发本场景一次 AI 搜索（异步运行，可在右侧刷新岗位）</div>
+          <div class="actions">
+            <button class="scenePrimary" id="btnStartSearch">开始AI搜索</button>
+          </div>
+
+          <hr style="border:none;border-top:1px solid rgba(36,50,77,0.6); margin:14px 0;" />
+
+          <div class="muted">运行状态（agent/crawl/prefilter/submit）</div>
+          <div class="actions" style="margin-top:10px;">
+            <button class="secondary" id="btnRefreshStatus">刷新状态</button>
+            <span id="statusRuntime" class="status"></span>
+          </div>
+          <pre id="runtimePanel" class="small"></pre>
+        </div>
+
+        <div class="panel">
+          <div class="h">中/高匹配岗位</div>
+          <div class="muted">数据源：SQLite list_jobs（match_level=高/中）</div>
+          <div id="statusJobs" class="status" style="margin-top:10px;"></div>
+          <div class="actions" style="margin-top:10px;">
+            <span class="muted">排序</span>
+            <select id="sortBy" style="background: rgba(9,13,22,0.6); border: 1px solid rgba(36,50,77,0.9); color: var(--text); padding: 10px 12px; border-radius: 12px; font-weight: 900;">
+              <option value="fetch_timestamp">最新抓取时间</option>
+              <option value="apply">AI是否建议投递</option>
+              <option value="match_level">匹配度</option>
+            </select>
+            <select id="sortDir" style="background: rgba(9,13,22,0.6); border: 1px solid rgba(36,50,77,0.9); color: var(--text); padding: 10px 12px; border-radius: 12px; font-weight: 900;">
+              <option value="desc">降序</option>
+              <option value="asc">升序</option>
+            </select>
+            <button class="secondary" id="btnReload">刷新</button>
+            <span class="muted" id="pageInfo"></span>
+            <button class="secondary" id="btnPrev">上一页</button>
+            <button class="secondary" id="btnNext">下一页</button>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>岗位</th>
+                <th>薪资</th>
+                <th>地点</th>
+                <th>匹配度</th>
+                <th>AI是否建议投递</th>
+                <th>抓取时间</th>
+                <th>人工标注不投递原因</th>
+              </tr>
+            </thead>
+            <tbody id="jobsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      function qs(name) {
+        const u = new URL(location.href);
+        return u.searchParams.get(name);
+      }
+      const sceneId = Number(qs("scene_id") || location.pathname.split("/").pop());
+      document.getElementById("sceneTitle").textContent = "scene_id=" + sceneId;
+
+      const state = {
+        page: 1,
+        pageSize: 25,
+        sortBy: "fetch_timestamp",
+        sortDir: "desc",
+        total: 0,
+        inFlight: false,
+      };
+
+      function isValidManualReason(s) {
+        // 避免误触：只有包含中英文（至少 1 个）才认为有效；纯空格/数字/标点一律无效
+        const t = (s || "").trim();
+        return /[A-Za-z\u4e00-\u9fff]/.test(t);
+      }
+
+      function setStatus(id, msg, kind) {
+        const el = document.getElementById(id);
+        el.textContent = msg || "";
+        el.className = "status" + (kind ? " " + kind : "");
+      }
+
+      async function getJson(url) {
+        const r = await fetch(url);
+        const t = await r.text();
+        let j = null; try { j = JSON.parse(t); } catch (_) {}
+        if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+        return j;
+      }
+
+      async function loadSceneInfo() {
+        try {
+          const j = await getJson("/api/scenes/list");
+          const scenes = j.scenes || [];
+          const s = scenes.find(x => Number(x.scene_id) === sceneId);
+          if (!s) { document.getElementById("sceneInfo").textContent = "未找到该 scene_id（请返回工作台刷新）"; return; }
+          document.getElementById("sceneInfo").textContent = JSON.stringify(s, null, 2);
+        } catch (e) {
+          document.getElementById("sceneInfo").textContent = "加载失败：" + (e?.message || String(e));
+        }
+      }
+
+      function linkCell(job) {
+        const a = document.createElement("a");
+        a.href = job.url || "#";
+        a.target = "_blank";
+        a.rel = "noreferrer";
+        a.textContent = job.title || "(无标题)";
+        return a;
+      }
+
+      function renderPageInfo() {
+        const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize));
+        document.getElementById("pageInfo").textContent =
+          "第 " + state.page + " / " + totalPages + " 页 · 共 " + (state.total || 0) + " 条";
+        document.getElementById("btnPrev").disabled = state.page <= 1;
+        document.getElementById("btnNext").disabled = state.page >= totalPages;
+      }
+
+      async function loadJobs(opts) {
+        if (state.inFlight) return;
+        state.inFlight = true;
+        if (!opts?.silent) setStatus("statusJobs", "加载中…");
+        const body = document.getElementById("jobsBody");
+        body.innerHTML = "";
+        try {
+          const url = new URL("/api/jobs/matched", location.origin);
+          url.searchParams.set("scene_id", String(sceneId));
+          url.searchParams.set("page", String(state.page));
+          url.searchParams.set("page_size", String(state.pageSize));
+          url.searchParams.set("sort_by", String(state.sortBy));
+          url.searchParams.set("sort_dir", String(state.sortDir));
+          const j = await getJson(url.toString());
+          const jobs = j.jobs || [];
+          state.total = Number(j.total || 0);
+          renderPageInfo();
+          if (!jobs.length) {
+            setStatus("statusJobs", "暂无中/高匹配岗位（可先点击左侧“开始AI搜索”）", "ok");
+            return;
+          }
+          setStatus("statusJobs", "本页 " + jobs.length + " 条", "ok");
+          jobs.forEach((job) => {
+            const tr = document.createElement("tr");
+            const td1 = document.createElement("td"); td1.appendChild(linkCell(job));
+            const td2 = document.createElement("td"); td2.textContent = job.salary || "";
+            const td3 = document.createElement("td"); td3.textContent = job.location || "";
+            const td4 = document.createElement("td"); td4.textContent = job.match_level || "";
+            const td5 = document.createElement("td"); td5.textContent = job.apply || "";
+            const td6 = document.createElement("td"); td6.textContent = job.fetch_timestamp || "";
+            const td7 = document.createElement("td");
+            const inp = document.createElement("input");
+            inp.type = "text";
+            inp.placeholder = "输入原因后回车/失焦即标记不投递";
+            inp.style.width = "100%";
+            inp.style.background = "rgba(9,13,22,0.6)";
+            inp.style.border = "1px solid rgba(36,50,77,0.9)";
+            inp.style.color = "var(--text)";
+            inp.style.padding = "10px 12px";
+            inp.style.borderRadius = "12px";
+            inp.dataset.platform = job.platform || "liepin";
+            inp.dataset.platformJobId = job.platform_job_id || "";
+            async function submitManualReject() {
+              const reason = (inp.value || "").trim();
+              const pid = (inp.dataset.platformJobId || "").trim();
+              if (!pid) return;
+              if (!isValidManualReason(reason)) {
+                // 不提交、不隐藏；保持输入框内容，提醒一次
+                if (reason) setStatus("statusJobs", "人工原因无效：需至少包含 1 个中文或英文字母（纯数字/标点不提交）", "err");
+                return;
+              }
+              inp.disabled = true;
+              try {
+                const r = await fetch("/api/jobs/manual_reject", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    scene_id: sceneId,
+                    platform: inp.dataset.platform || "liepin",
+                    platform_job_id: pid,
+                    reason,
+                  }),
+                });
+                const t = await r.text();
+                let jj = null; try { jj = JSON.parse(t); } catch (_) {}
+                if (!r.ok) throw new Error(jj?.detail || jj?.msg || t || ("HTTP " + r.status));
+                if (jj?.code && jj.code !== 200) throw new Error(jj.msg || "业务失败");
+                // 成功：该岗位应被服务端过滤掉；本地先移除，再刷新以校正 total/page
+                tr.remove();
+                state.total = Math.max(0, (state.total || 0) - 1);
+                const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize));
+                if (state.page > totalPages) state.page = totalPages;
+                renderPageInfo();
+                await loadJobs({ silent: true });
+              } catch (e) {
+                inp.disabled = false;
+                setStatus("statusJobs", "人工标注失败：" + (e?.message || String(e)), "err");
+              }
+            }
+            inp.addEventListener("keydown", (ev) => {
+              if (ev.key === "Enter") {
+                ev.preventDefault();
+                submitManualReject();
+              }
+            });
+            inp.addEventListener("blur", submitManualReject);
+            td7.appendChild(inp);
+
+            tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3); tr.appendChild(td4);
+            tr.appendChild(td5); tr.appendChild(td6); tr.appendChild(td7);
+            body.appendChild(tr);
+          });
+        } catch (e) {
+          setStatus("statusJobs", "加载失败：" + (e?.message || String(e)), "err");
+        } finally {
+          state.inFlight = false;
+        }
+      }
+
+      async function runAsync() {
+        setStatus("statusRun", "启动中…");
+        try {
+          const r = await fetch("/api/agent/run_async?scene_id=" + encodeURIComponent(sceneId), { method: "POST" });
+          const t = await r.text();
+          let j = null; try { j = JSON.parse(t); } catch (_) {}
+          if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+          if (j.code && j.code !== 200) throw new Error(j.msg || "业务失败");
+          const taskId = j.task_id;
+          setStatus("statusRun", "已启动 task_id=" + taskId + "，轮询中…");
+          refreshRuntimeStatus();
+          await pollTask(taskId);
+        } catch (e) {
+          setStatus("statusRun", "启动失败：" + (e?.message || String(e)), "err");
+        }
+      }
+
+      async function pollTask(taskId) {
+        const started = Date.now();
+        while (true) {
+          await new Promise((r) => setTimeout(r, 2000));
+          let j;
+          try {
+            j = await getJson("/api/agent/task/" + encodeURIComponent(taskId));
+          } catch (e) {
+            setStatus("statusRun", "轮询失败：" + (e?.message || String(e)), "err");
+            return;
+          }
+          const st = j.status || "unknown";
+          const msg = j.progress_message || "";
+          if (st === "success") {
+            setStatus("statusRun", "完成：" + msg, "ok");
+            refreshRuntimeStatus();
+            await loadJobs();
+            return;
+          }
+          if (st === "error") {
+            setStatus("statusRun", "失败：" + msg, "err");
+            refreshRuntimeStatus();
+            return;
+          }
+          const elapsed = Math.floor((Date.now() - started) / 1000);
+          setStatus("statusRun", "运行中(" + elapsed + "s)： " + msg);
+        }
+      }
+
+      function _fmtTs(ts) {
+        if (!ts) return "";
+        try {
+          const d = new Date(ts * 1000);
+          if (!isNaN(d.getTime())) return d.toLocaleString();
+        } catch (_) {}
+        return String(ts);
+      }
+
+      async function refreshRuntimeStatus() {
+        setStatus("statusRuntime", "加载中…");
+        try {
+          const j = await getJson("/api/scenes/runtime_status?scene_id=" + encodeURIComponent(sceneId));
+          const stages = j.stages || {};
+          const lines = [];
+          ["agent", "crawl", "prefilter", "submit"].forEach((k) => {
+            const s = stages[k] || {};
+            const running = !!s.running;
+            const started = _fmtTs(s.started_at);
+            const meta = s.meta ? JSON.stringify(s.meta) : "";
+            lines.push(k + ": " + (running ? "运行中" : "空闲") + (started ? " | started=" + started : "") + (meta ? " | meta=" + meta : ""));
+          });
+          const tasks = j.agent_tasks || [];
+          if (tasks.length) {
+            lines.push("");
+            lines.push("agent tasks（最近5条）:");
+            tasks.forEach((t) => {
+              lines.push("- " + t.task_id + " | " + (t.status || "") + " | " + (t.progress_message || ""));
+            });
+          }
+          document.getElementById("runtimePanel").textContent = lines.join("\\n");
+          setStatus("statusRuntime", "已刷新", "ok");
+        } catch (e) {
+          setStatus("statusRuntime", "加载失败：" + (e?.message || String(e)), "err");
+        }
+      }
+
+      // 下方按钮：真正触发 agent 流水线
+      document.getElementById("btnStartSearch").addEventListener("click", runAsync);
+      document.getElementById("btnRefreshStatus").addEventListener("click", refreshRuntimeStatus);
+      document.getElementById("btnReload").addEventListener("click", () => loadJobs());
+      document.getElementById("sortBy").addEventListener("change", (e) => {
+        state.sortBy = e.target.value;
+        state.page = 1;
+        loadJobs();
+      });
+      document.getElementById("sortDir").addEventListener("change", (e) => {
+        state.sortDir = e.target.value;
+        state.page = 1;
+        loadJobs();
+      });
+      document.getElementById("btnPrev").addEventListener("click", () => {
+        state.page = Math.max(1, state.page - 1);
+        loadJobs();
+      });
+      document.getElementById("btnNext").addEventListener("click", () => {
+        const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize));
+        state.page = Math.min(totalPages, state.page + 1);
+        loadJobs();
+      });
+
+      document.getElementById("btnUpload").addEventListener("click", async () => {
+        setStatus("statusUpload", "上传中…");
+        document.getElementById("resultUpload").textContent = "";
+        try {
+          const f = document.getElementById("uploadFile").files?.[0];
+          if (!f) throw new Error("请选择文件");
+          const fd = new FormData(); fd.append("file", f);
+          const r = await fetch("/api/scenes/" + encodeURIComponent(sceneId) + "/resume/upload", { method: "POST", body: fd });
+          const t = await r.text();
+          let j = null; try { j = JSON.parse(t); } catch (_) {}
+          if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+          if (j.code && j.code !== 200) throw new Error(j.msg || "业务失败");
+          setStatus("statusUpload", "完成：简历已更新", "ok");
+          document.getElementById("resultUpload").textContent = JSON.stringify(j, null, 2);
+        } catch (e) {
+          setStatus("statusUpload", "失败：" + (e?.message || String(e)), "err");
+        }
+      });
+
+      loadSceneInfo();
+      loadJobs();
+      refreshRuntimeStatus();
+      setInterval(() => loadJobs({ silent: true }), 60 * 1000);
+    </script>
+  </body>
+</html>
+

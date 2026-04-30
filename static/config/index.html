@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>job-finding-AI-Agent 配置生成器</title>
+    <style>
+      :root {
+        --bg: #0b0f19;
+        --panel: #121a2a;
+        --text: #e7eefc;
+        --muted: #a9b6d3;
+        --border: #24324d;
+        --accent: #5aa7ff;
+        --danger: #ff6b6b;
+        --ok: #39d98a;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "PingFang SC",
+          "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+        background: radial-gradient(1200px 600px at 20% 0%, #132449 0%, var(--bg) 60%);
+        color: var(--text);
+      }
+      a { color: var(--accent); text-decoration: none; }
+      .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 18px 60px; }
+      .header { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+      .title { font-size: 22px; font-weight: 700; }
+      .subtitle { color: var(--muted); font-size: 13px; }
+      .notice {
+        margin-top: 14px;
+        background: rgba(255, 107, 107, 0.08);
+        border: 1px solid rgba(255, 107, 107, 0.35);
+        padding: 12px 14px;
+        border-radius: 10px;
+        color: #ffd6d6;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .grid { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 16px; }
+      .card {
+        background: rgba(18, 26, 42, 0.92);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 14px 14px 10px;
+      }
+      .card h2 { margin: 0 0 10px 0; font-size: 15px; }
+      .row { display: grid; grid-template-columns: 280px 1fr; gap: 12px; padding: 10px 0; border-top: 1px solid rgba(36,50,77,0.6); }
+      .row:first-of-type { border-top: none; }
+      .k { font-weight: 600; font-size: 13px; }
+      .help { margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
+      .inputWrap { display: flex; gap: 8px; align-items: flex-start; }
+      input[type="text"], input[type="password"] {
+        width: 100%;
+        background: rgba(9, 13, 22, 0.85);
+        border: 1px solid rgba(36,50,77,0.9);
+        color: var(--text);
+        padding: 10px 10px;
+        border-radius: 10px;
+        outline: none;
+        font-size: 13px;
+      }
+      input:focus { border-color: rgba(90,167,255,0.9); box-shadow: 0 0 0 3px rgba(90,167,255,0.15); }
+      .hint { margin-top: 6px; font-size: 12px; color: var(--muted); }
+      .pill {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(36,50,77,0.9);
+        background: rgba(9, 13, 22, 0.65);
+        color: var(--muted);
+        font-size: 12px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .pill:hover { border-color: rgba(90,167,255,0.7); color: var(--text); }
+      .actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+        align-items: center;
+      }
+      button {
+        background: linear-gradient(180deg, rgba(90,167,255,1) 0%, rgba(49,122,240,1) 100%);
+        border: none;
+        color: white;
+        padding: 10px 12px;
+        border-radius: 12px;
+        font-weight: 700;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button.secondary {
+        background: rgba(9, 13, 22, 0.6);
+        border: 1px solid rgba(36,50,77,0.9);
+        color: var(--text);
+        font-weight: 600;
+      }
+      .status { font-size: 13px; color: var(--muted); }
+      .status.ok { color: var(--ok); }
+      .status.err { color: var(--danger); }
+      .footer { margin-top: 22px; color: var(--muted); font-size: 12px; }
+      @media (max-width: 860px) {
+        .row { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="header">
+        <div class="title">配置生成器（.env）</div>
+        <div class="subtitle">仅用于本机：填写后写入项目根目录 <code>.env</code></div>
+      </div>
+      <div class="notice">
+        该页面与保存接口默认只允许 <strong>127.0.0.1 / localhost</strong> 访问。请勿截图泄露密钥。
+        保存成功后需要 <strong>重启服务</strong> 才会生效。
+      </div>
+
+      <div class="actions">
+        <button id="btnSave">保存到 .env</button>
+        <button class="secondary" id="btnFillDefaults">填入默认值</button>
+        <button class="secondary" id="btnClear">清空所有输入</button>
+        <span id="status" class="status"></span>
+      </div>
+
+      <div id="app" class="grid"></div>
+
+      <div class="footer">
+        接口：<code>GET /api/config/env_schema</code>，<code>POST /api/config/write_env</code>。
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        schema: null,
+        inputs: new Map(), // key -> input element
+      };
+
+      function el(tag, attrs = {}, children = []) {
+        const node = document.createElement(tag);
+        Object.entries(attrs).forEach(([k, v]) => {
+          if (k === "class") node.className = v;
+          else if (k === "text") node.textContent = v;
+          else node.setAttribute(k, v);
+        });
+        children.forEach((c) => node.appendChild(c));
+        return node;
+      }
+
+      function setStatus(msg, kind = "") {
+        const s = document.getElementById("status");
+        s.textContent = msg || "";
+        s.className = "status" + (kind ? " " + kind : "");
+      }
+
+      function groupFields(fields) {
+        const map = new Map();
+        fields.forEach((f) => {
+          const g = f.group || "默认";
+          if (!map.has(g)) map.set(g, []);
+          map.get(g).push(f);
+        });
+        return Array.from(map.entries());
+      }
+
+      function render(schema) {
+        const app = document.getElementById("app");
+        app.innerHTML = "";
+        state.inputs.clear();
+
+        const groups = groupFields(schema.fields || []);
+        groups.forEach(([groupName, fields]) => {
+          const card = el("div", { class: "card" });
+          card.appendChild(el("h2", { text: groupName }));
+          fields.forEach((f) => {
+            const row = el("div", { class: "row" });
+            const left = el("div");
+            left.appendChild(el("div", { class: "k", text: f.key }));
+            if (f.help) left.appendChild(el("div", { class: "help", text: f.help }));
+
+            const right = el("div");
+            const inputType = f.is_secret ? "password" : "text";
+            const input = el("input", {
+              type: inputType,
+              "data-key": f.key,
+              placeholder: f.example || f.default || "",
+              value: "",
+            });
+            state.inputs.set(f.key, input);
+
+            const wrap = el("div", { class: "inputWrap" });
+            wrap.appendChild(input);
+            if (f.is_secret) {
+              const toggle = el("span", { class: "pill", text: "显示/隐藏" });
+              toggle.addEventListener("click", () => {
+                input.type = input.type === "password" ? "text" : "password";
+              });
+              wrap.appendChild(toggle);
+            }
+
+            right.appendChild(wrap);
+            const hintParts = [];
+            if (f.default) hintParts.push("默认: " + f.default);
+            if (f.example) hintParts.push("示例: " + f.example);
+            if (hintParts.length) right.appendChild(el("div", { class: "hint", text: hintParts.join(" | ") }));
+
+            row.appendChild(left);
+            row.appendChild(right);
+            card.appendChild(row);
+          });
+          app.appendChild(card);
+        });
+      }
+
+      async function loadSchema() {
+        setStatus("加载 schema 中…");
+        const r = await fetch("/api/config/env_schema");
+        if (!r.ok) {
+          const t = await r.text();
+          throw new Error("加载失败: " + r.status + " " + t);
+        }
+        const schema = await r.json();
+        state.schema = schema;
+        render(schema);
+        setStatus("已加载 .env.example 字段（" + (schema.fields?.length || 0) + " 项）");
+      }
+
+      function collectValues() {
+        const values = {};
+        for (const [key, input] of state.inputs.entries()) {
+          values[key] = (input.value || "").trim();
+        }
+        return values;
+      }
+
+      function fillDefaults() {
+        if (!state.schema) return;
+        state.schema.fields.forEach((f) => {
+          const input = state.inputs.get(f.key);
+          if (!input) return;
+          if (!input.value) input.value = f.default || "";
+        });
+      }
+
+      function clearAll() {
+        for (const input of state.inputs.values()) input.value = "";
+      }
+
+      async function saveEnv() {
+        const values = collectValues();
+        const r = await fetch("/api/config/write_env", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ values, backup: true }),
+        });
+        const bodyText = await r.text();
+        let body = null;
+        try { body = JSON.parse(bodyText); } catch (_) {}
+        if (!r.ok) {
+          const msg = body?.detail || bodyText || ("HTTP " + r.status);
+          throw new Error(msg);
+        }
+        return body;
+      }
+
+      document.getElementById("btnFillDefaults").addEventListener("click", () => {
+        fillDefaults();
+        setStatus("已填入默认值（仅填充空白项）", "ok");
+      });
+      document.getElementById("btnClear").addEventListener("click", () => {
+        clearAll();
+        setStatus("已清空输入", "ok");
+      });
+      document.getElementById("btnSave").addEventListener("click", async () => {
+        setStatus("写入 .env 中…");
+        try {
+          const res = await saveEnv();
+          setStatus("写入成功： " + res.env_path + "（写入 " + (res.written_keys?.length || 0) + " 项）", "ok");
+        } catch (e) {
+          setStatus("写入失败：" + (e?.message || String(e)), "err");
+        }
+      });
+
+      loadSchema().catch((e) => setStatus(e.message || String(e), "err"));
+    </script>
+  </body>
+</html>
+

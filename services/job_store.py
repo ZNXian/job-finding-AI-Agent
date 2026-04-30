@@ -226,6 +226,174 @@ def _get_crawl_conn(platform: str) -> sqlite3.Connection:
         return _crawl_conns[key]
 
 
+def get_crawl_scene_stats(
+    *,
+    platform: str,
+    scene_id: int,
+) -> Dict[str, Any]:
+    """返回某平台某场景的爬取统计：job_count 与 last_fetch_timestamp（字符串）。"""
+    platform_name = str(platform or "").strip().lower() or "liepin"
+    conn = _get_crawl_conn(platform_name)
+    with _lock:
+        _ensure_list_jobs_platform_cols(conn)
+        _ensure_list_jobs_llm_cols(conn)
+        _ensure_list_jobs_salary_col(conn)
+        row = conn.execute(
+            """
+            SELECT
+              COUNT(*) AS job_count,
+              MAX(fetch_timestamp) AS last_fetch_timestamp
+            FROM list_jobs
+            WHERE scene_id = ?
+              AND platform = ?
+            """,
+            (int(scene_id), platform_name),
+        ).fetchone()
+    if not row:
+        return {"job_count": 0, "last_fetch_timestamp": ""}
+    try:
+        jc = int(row["job_count"] or 0)
+    except Exception:
+        jc = 0
+    ts = str(row["last_fetch_timestamp"] or "").strip()
+    return {"job_count": jc, "last_fetch_timestamp": ts}
+
+
+def get_crawl_list_jobs_by_match_levels(
+    *,
+    platform: str,
+    scene_id: int,
+    match_levels: List[str],
+    limit: int = 50,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """按 scene_id + match_level 读取列表快照库 list_jobs（用于 Web UI 展示）。"""
+    platform_name = (platform or "unknown").strip().lower() or "unknown"
+    levels = [str(x or "").strip() for x in (match_levels or []) if str(x or "").strip()]
+    if not levels:
+        levels = ["高", "中"]
+    with _lock:
+        conn = _get_crawl_conn(platform_name)
+        _ensure_list_jobs_llm_cols(conn)
+        _ensure_list_jobs_hr_greeting(conn)
+        _ensure_list_jobs_salary_col(conn)
+        _ensure_list_jobs_platform_cols(conn)
+        q_marks = ", ".join(["?"] * len(levels))
+        sql = (
+            "SELECT scene_id, platform, platform_job_id, title, company, location, salary, url, "
+            "description, fetch_timestamp, match_level, reason, apply, hr_greeting "
+            "FROM list_jobs WHERE scene_id = ? AND match_level IN ("
+            + q_marks
+            + ") ORDER BY fetch_timestamp DESC LIMIT ? OFFSET ?"
+        )
+        params: List[Any] = [int(scene_id), *levels, int(limit), int(offset)]
+        cur = conn.execute(sql, params)
+        rows = cur.fetchall() if cur else []
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        d = dict(r) if isinstance(r, sqlite3.Row) else dict(r)
+        out.append(d)
+    return out
+
+
+def get_crawl_list_jobs_for_ui(
+    *,
+    platform: str,
+    scene_id: int,
+    match_levels: List[str],
+    limit: int,
+    offset: int,
+    sort_by: Literal["fetch_timestamp", "apply", "match_level"] = "fetch_timestamp",
+    sort_dir: Literal["asc", "desc"] = "desc",
+    hide_manual_rejected: bool = True,
+) -> Dict[str, Any]:
+    """Web UI 查询：分页 + total + 服务端全量排序 + 可选隐藏人工不投递。"""
+    platform_name = (platform or "unknown").strip().lower() or "unknown"
+    levels = [str(x or "").strip() for x in (match_levels or []) if str(x or "").strip()]
+    if not levels:
+        levels = ["高", "中"]
+    sort_by = (sort_by or "fetch_timestamp").strip().lower()  # type: ignore[assignment]
+    if sort_by not in {"fetch_timestamp", "apply", "match_level"}:
+        sort_by = "fetch_timestamp"
+    sort_dir = (sort_dir or "desc").strip().lower()  # type: ignore[assignment]
+    if sort_dir not in {"asc", "desc"}:
+        sort_dir = "desc"
+
+    q_marks = ", ".join(["?"] * len(levels))
+    where = "scene_id = ? AND match_level IN (" + q_marks + ")"
+    if hide_manual_rejected:
+        where += " AND (manual_apply IS NULL OR manual_apply = '')"
+
+    # 排序：服务端全量排序，避免前端分页后局部排序导致跨页不一致
+    dir_sql = "ASC" if sort_dir == "asc" else "DESC"
+    if sort_by == "apply":
+        # apply: 是/否/空。默认 desc: 是 在前；asc: 否 在前。
+        yes_rank, no_rank = ((0, 1) if sort_dir == "desc" else (1, 0))
+        order_by = (
+            "ORDER BY "
+            f"CASE WHEN apply = '是' THEN {yes_rank} WHEN apply = '否' THEN {no_rank} ELSE 2 END, "
+            "CASE WHEN fetch_timestamp = '' THEN 1 ELSE 0 END, "
+            f"fetch_timestamp {dir_sql}"
+        )
+    elif sort_by == "match_level":
+        # match_level: 高 > 中 > 低 > 空。desc: 高在前；asc: 空/低在前。
+        if sort_dir == "desc":
+            order_by = (
+                "ORDER BY "
+                "CASE WHEN match_level = '高' THEN 0 WHEN match_level = '中' THEN 1 "
+                "WHEN match_level = '低' THEN 2 ELSE 3 END, "
+                "CASE WHEN fetch_timestamp = '' THEN 1 ELSE 0 END, "
+                f"fetch_timestamp {dir_sql}"
+            )
+        else:
+            order_by = (
+                "ORDER BY "
+                "CASE WHEN match_level = '' THEN 0 WHEN match_level = '低' THEN 1 "
+                "WHEN match_level = '中' THEN 2 WHEN match_level = '高' THEN 3 ELSE 4 END, "
+                "CASE WHEN fetch_timestamp = '' THEN 1 ELSE 0 END, "
+                f"fetch_timestamp {dir_sql}"
+            )
+    else:
+        # fetch_timestamp：空值放最后（无论 asc/desc）
+        order_by = (
+            "ORDER BY "
+            "CASE WHEN fetch_timestamp = '' THEN 1 ELSE 0 END, "
+            f"fetch_timestamp {dir_sql}"
+        )
+
+    with _lock:
+        conn = _get_crawl_conn(platform_name)
+        _ensure_list_jobs_llm_cols(conn)
+        _ensure_list_jobs_hr_greeting(conn)
+        _ensure_list_jobs_salary_col(conn)
+        _ensure_list_jobs_platform_cols(conn)
+
+        params_base: List[Any] = [int(scene_id), *levels]
+        total_row = conn.execute(
+            "SELECT COUNT(1) AS cnt FROM list_jobs WHERE " + where,
+            params_base,
+        ).fetchone()
+        total = int(total_row["cnt"] or 0) if total_row else 0
+
+        sql = (
+            "SELECT scene_id, platform, platform_job_id, title, company, location, salary, url, "
+            "description, fetch_timestamp, match_level, reason, apply, hr_greeting, manual_apply, manual_reason "
+            "FROM list_jobs WHERE "
+            + where
+            + " "
+            + order_by
+            + " LIMIT ? OFFSET ?"
+        )
+        cur = conn.execute(sql, [*params_base, int(limit), int(offset)])
+        rows = cur.fetchall() if cur else []
+
+    items: List[Dict[str, Any]] = []
+    for r in rows:
+        d = dict(r) if isinstance(r, sqlite3.Row) else dict(r)
+        items.append(d)
+    return {"total": total, "items": items}
+
+
 def update_crawl_list_hr_greeting(
     platform: str, scene_id: int, url_or_platform_job_id: str, hr_greeting: str
 ) -> None:
@@ -274,6 +442,37 @@ def update_crawl_list_llm_fields(
                 str(reason or ""),
                 str(apply or ""),
                 str(hr_greeting or ""),
+                platform_name,
+                pid,
+                int(scene_id),
+            ),
+        )
+        conn.commit()
+
+
+def update_crawl_list_manual_fields(
+    platform: str,
+    scene_id: int,
+    url_or_platform_job_id: str,
+    *,
+    manual_apply: str,
+    manual_reason: str,
+) -> None:
+    """人工复核字段回写：manual_apply/manual_reason（按 scene_id+platform+platform_job_id）。"""
+    pid = resolve_liepin_platform_job_id(url_or_platform_job_id)
+    if not pid:
+        return
+    conn = _get_crawl_conn(platform)
+    with _lock:
+        _ensure_list_jobs_llm_cols(conn)
+        _ensure_list_jobs_platform_cols(conn)
+        platform_name = str(platform or "").strip().lower() or "liepin"
+        conn.execute(
+            "UPDATE list_jobs SET manual_apply = ?, manual_reason = ? "
+            "WHERE platform = ? AND platform_job_id = ? AND scene_id = ?",
+            (
+                str(manual_apply or ""),
+                str(manual_reason or ""),
                 platform_name,
                 pid,
                 int(scene_id),

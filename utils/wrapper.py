@@ -1,6 +1,7 @@
 from functools import wraps
 import traceback
 from config import log
+from fastapi import HTTPException
 
 def handle_api_exception(func):
     """简单的API异常处理装饰器"""
@@ -8,6 +9,9 @@ def handle_api_exception(func):
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except HTTPException:
+            # 透传 FastAPI 的标准异常（保持真实 HTTP 状态码）
+            raise
         except Exception as e:
             log.error(f"接口异常: {str(e)}\n{traceback.format_exc()}")
             return {
@@ -24,6 +28,9 @@ def handle_api_exception_async(func):
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
+        except HTTPException:
+            # 透传 FastAPI 的标准异常（保持真实 HTTP 状态码）
+            raise
         except Exception as e:
             log.error(f"接口异常: {str(e)}\n{traceback.format_exc()}")
             return {

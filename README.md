@@ -6,7 +6,7 @@
 
 支持通过本地文件（`txt` / `md` / 简历 `pdf` 或图片 `png` 等，见 `services/resume_document_ingest`）中的自然语言描述，经 LLM 结构化决策**复用或新建**求职场景；接口为 `POST /api/start_from_txt`（Body 传服务器路径）或 `POST /api/start_from_upload`（multipart，单文件上限见 `config.MAX_SCENE_UPLOAD_BYTES`）。
 
-每个场景拥有独立的配置：关键词、目标城市、薪资区间、个人要求；可选 **LangGraph 一键流水线** `POST /api/agent/run`：可选 `user_file_path` 先做场景准备，再依次调用登录 → 爬取（仅 SQLite）→ 标题初筛 → 详情精筛（内部 HTTP 调本服务，默认基址 `config.AGENT_API_BASE_URL`，与 `PORT` 对齐；超时见 `AGENT_TIMEOUT_*`）。
+每个场景拥有独立的配置：关键词、目标城市、薪资区间、个人要求；可选 **LangGraph 一键流水线** `POST /api/agent/run`（或异步 `POST /api/agent/run_async`）：可选 `user_file_path` 先做场景准备，再依次调用（爬取决策→可选爬取）→ 标题初筛 → 详情精筛（内部 HTTP 调本服务，默认基址 `config.AGENT_API_BASE_URL`，与 `PORT` 对齐；超时见 `AGENT_TIMEOUT_*`）。登录态由爬虫内部自行检查/恢复（工作流已移除显式 login 节点）。
 
 目前只支持猎聘；后续可扩展更多招聘平台。
 
@@ -58,7 +58,18 @@ python -m playwright install chromium
 PowerShell：`Copy-Item .env.example .env`  
 bash：`cp .env.example .env`
 
-2. 编辑 `.env`。应用启动时由 `config.py` 通过 `python-dotenv` 加载项目根目录下的 `.env`。与 `.env.example` 中变量对应关系如下（详见模板内注释）：
+2. 可视化填写（推荐）：先启动服务（即使没有 `.env` 也能启动，但相关接口会因缺少 Key 而不可用），然后访问 `http://127.0.0.1:8000/config` 填表并保存到项目根目录 `.env`，最后**重启服务**生效。
+
+> 该页面与保存接口仅允许本机访问（localhost/127.0.0.1），请勿截图泄露密钥。
+
+3. 场景可视化创建/查看（可选）：启动服务后访问：
+
+- `http://127.0.0.1:8000/scenes`：粘贴文本 / 上传 txt/md / 按字段填表 → 自动匹配或新建场景（内部会写入 `data/scene_temp.<timestamp>.txt` 便于排障；含敏感信息，注意清理）。
+- `http://127.0.0.1:8000/scenes/list`：卡片式查看当前所有场景（仅结构化字段，不显示简历全文）。
+
+同样仅允许本机访问（localhost/127.0.0.1）。
+
+4. 手动编辑：编辑 `.env`。应用启动时由 `config.py` 通过 `python-dotenv` 加载项目根目录下的 `.env`。与 `.env.example` 中变量对应关系如下（详见模板内注释）：
 
 | 变量 | 说明 |
 |------|------|
@@ -73,9 +84,9 @@ bash：`cp .env.example .env`
 | `openai_API_KEY` / `OPENAI_API_BASE` / `OPENAI_EMBEDDING_MODEL` | 记忆向量嵌入（与 `config` 中默认网关、模型一致） |
 | `MAX_PAGE` | 爬列表最大页数，测试可设为 `1` |
 
-3. **LangGraph** `POST /api/agent/run` 通过 HTTP 回调本服务：可在 `.env` 中设置 `AGENT_API_BASE_URL`（未设置时 `config` 默认为 `http://127.0.0.1:{PORT}`，须与实际监听端口一致）。可选超时（秒）：`AGENT_TIMEOUT_LOGIN_S`、`AGENT_TIMEOUT_CRAWL_S`、`AGENT_TIMEOUT_PREFILTER_S`、`AGENT_TIMEOUT_SUBMIT_S`（见 `agent_orchestrator.py`）。
+5. **LangGraph** `POST /api/agent/run` 通过 HTTP 回调本服务：可在 `.env` 中设置 `AGENT_API_BASE_URL`（未设置时 `config` 默认为 `http://127.0.0.1:{PORT}`，须与实际监听端口一致）。可选超时（秒）：`AGENT_TIMEOUT_LOGIN_S`、`AGENT_TIMEOUT_CRAWL_S`、`AGENT_TIMEOUT_PREFILTER_S`、`AGENT_TIMEOUT_SUBMIT_S`（见 `agent_orchestrator.py`）。Web 工作台默认使用异步 `POST /api/agent/run_async` + 轮询 `GET /api/agent/task/{task_id}`。
 
-4. `HOST`、`PORT` 等写在 `config.py` 源码中（默认 `PORT=8000`）；上传单文件大小上限为 `config.MAX_SCENE_UPLOAD_BYTES`，**不从** `.env` 读取。
+6. `HOST`、`PORT` 等写在 `config.py` 源码中（默认 `PORT=8000`）；上传单文件大小上限为 `config.MAX_SCENE_UPLOAD_BYTES`，**不从** `.env` 读取。
 
 # 启动服务
 
@@ -87,6 +98,20 @@ python main.py （端口以 config.py 里的 HOST / PORT 为准。）
 
 uvicorn main:app --host 0.0.0.0 --port 8000
 
+# Web 工作台（推荐）
+
+启动服务后，在浏览器打开：
+
+- 主入口：`http://127.0.0.1:8000/`（首次若无 `.env` 会提示填写并保存；已有 `.env` 会回填可修改）
+- 工作台：`http://127.0.0.1:8000/workspace`（左侧填表为唯一创建入口；粘贴/上传仅做自动识别回填，允许手动编辑）
+- 场景详情：在工作台点某个 `scene_id` 进入；点击 **“开始AI搜索”** 异步启动 Agent；右侧查看 `高/中` 匹配岗位（分页 25 条/页、支持按 AI 是否建议投递/匹配度排序、1 分钟自动刷新）；支持“人工标注不投递原因”（写入 SQLite 并在列表隐藏）
+
+说明：
+
+- 以上页面与相关接口仅允许本机访问（localhost/127.0.0.1）。
+- 保存 `.env` 后需要**重启服务**生效。
+- 场景粘贴文本会落盘到 `data/scene_temp.<timestamp>.txt`（便于排障；包含敏感信息，注意清理）。
+
 # 介绍
 
 服务默认运行在 `http://localhost:{PORT}`（`PORT` 以 `config.py` 为准；本地浏览器常用 `http://127.0.0.1:{PORT}`）。
@@ -95,19 +120,28 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 有头模式安全,已采取安全的反反爬手段
 
-**HTTP 路由**在 `api/` 包内注册，`main.py` 仅创建 `FastAPI` 并挂载路由；完整路径列表与说明见 `main.py` 顶部注释（与下列一致，均为 **POST**）：
+**HTTP 路由**在 `api/` 包内注册，`main.py` 仅创建 `FastAPI` 并挂载路由；完整路径列表与说明见 `main.py` 顶部注释（与下列一致；部分为 **GET**）：
 
 | 路径 | 说明 |
 |------|------|
 | `/api/liepin_login` | 猎聘浏览器登录，保存 `storage_state` |
 | `/api/start_from_txt` | Body：`file_path`（服务器本地路径），场景准备（与 LangGraph 内 `prepare_scene` 同源） |
+| `/api/start_from_text` | Body：`text`（直贴文本），写入 `data/scene_temp.<timestamp>.txt` 后同上 |
 | `/api/start_from_upload` | `multipart/form-data` 上传单文件；大小上限 `config.MAX_SCENE_UPLOAD_BYTES`（代码常量，非 env） |
+| `/api/scenes/recognize_fields` | 从文本抽取标准场景字段（用于工作台“自动识别→回填表单”，不创建场景） |
+| `/api/scenes/{scene_id}/resume/upload` | 仅更新该 scene 的简历文本 `data/resume/{scene_id}.txt`（不触发场景匹配） |
+| `/api/scenes/runtime_status` | **GET**：查询该 scene 的 `agent/crawl/prefilter/submit` 是否运行中，并返回最近 agent 任务摘要 |
 | `/api/crawl_liepin` | 爬取 + 可选 LLM + 写 CSV；Query：`scene_id`，`crawl_only`，`reset_checkpoint` |
 | `/api/crawl_liepin_crawl_only` | 只爬取写 SQLite；Query：`scene_id`，`reset_checkpoint` |
 | `/api/prefilter_titles_for_scene` | 标题初筛写回 SQLite；Query：`scene_id`，`include_*` |
 | `/api/submit_llm_for_scene` | 详情精筛 pending、写 CSV；Query：`scene_id` |
 | `/api/feedback` | 人工反馈后更新记忆；Query：`scene_id` |
-| `/api/agent/run` | LangGraph：`scene_id` 与 `user_file_path`（Query）二选一；可选 `reset_checkpoint`、`include_*`；线程池内执行以免自调用死锁 |
+| `/api/agent/run` | LangGraph：`scene_id` 与 `user_file_path`（Query）二选一；可选 `reset_checkpoint`、`include_*`；含“是否爬取”的规则决策，必要时会自动跳过 crawl |
+| `/api/agent/run_async` | 同上，但立即返回 `task_id`；配合 `GET /api/agent/task/{task_id}` 轮询状态 |
+| `/api/agent/task/{task_id}` | 查询异步任务状态：pending/running/success/error，并返回 progress_message/result |
+| `/api/jobs/matched` | **GET**：从 SQLite 查询 `scene_id` 下匹配度为高/中的岗位列表（分页/排序） |
+| `/api/jobs/manual_reject` | 人工标注“不投递原因”（只接受含中英文的 reason），写入 SQLite 并在岗位列表隐藏 |
+| `/api/config/read_env` | 读取并解析项目根目录 `.env`（用于主入口回填） |
 
 文件扩展名与 VLM/PDF：`.txt` / `.md`、`.png` / `.jpg` / `.jpeg` / `.webp`（VLM 转纯文本）、`.pdf`（先抽文本，不足再渲染前若干页走 VLM）。需配置 `DASHSCOPE_API_KEY`；PDF 需 `pymupdf`（见 `requirements.txt`）。**方案 B**：首次可将「求职期望 + 简历」放在同一文件做场景匹配；之后若只改 `data/resume/{scene_id}.txt`，不会自动改写 `SCENE.json`，除非再次调用场景匹配类接口。
 

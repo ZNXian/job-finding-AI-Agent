@@ -132,6 +132,50 @@ logging.basicConfig(
 # 全局共用的 log 对象
 log = logging.getLogger(__name__)
 
+# ------------------------------------------------------------------------------
+# 防止第三方 SDK（openai/httpx 等）在 DEBUG 下输出包含 messages 的整包请求日志。
+# 典型表现：日志中出现 "Request options: {... 'json_data': {'messages': [...]}}"，
+# 会导致简历/岗位详情等敏感信息写入 log 文件。
+# ------------------------------------------------------------------------------
+
+class _DropSensitiveRequestOptions(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if not msg:
+            return True
+        # OpenAI SDK (stainless) 常见 debug 行
+        if "Request options:" in msg:
+            return False
+        # 兜底：若日志中直接包含 json_data/messages 片段，也丢弃
+        if "json_data" in msg and "'messages'" in msg:
+            return False
+        return True
+
+
+# 降低 noisy logger 的级别，避免 DEBUG 细节淹没业务日志.第三方库的 logger 级别拉到 WARNING
+for _name in (
+    "openai",
+    "httpx",
+    "httpcore",
+    "stainless",
+    "stainless_httpx",
+):
+    try:
+        logging.getLogger(_name).setLevel(logging.WARNING)
+    except Exception:
+        pass
+
+# 给 root handlers 加过滤器：无论来自哪个 logger，都不会写入敏感整包日志
+try:
+    _root = logging.getLogger()
+    for _h in list(getattr(_root, "handlers", []) or []):
+        _h.addFilter(_DropSensitiveRequestOptions())
+except Exception:
+    pass
+
 # AI 生成
 # 生成目的：通义/百炼 Python SDK 全局 base，与 DASHSCOPE_BASE_HTTP_API_URL 及 Key 地域一致
 try:

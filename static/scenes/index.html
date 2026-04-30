@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>场景创建（粘贴/上传/表单）</title>
+    <style>
+      :root {
+        --bg: #0b0f19;
+        --panel: #121a2a;
+        --text: #e7eefc;
+        --muted: #a9b6d3;
+        --border: #24324d;
+        --accent: #5aa7ff;
+        --danger: #ff6b6b;
+        --ok: #39d98a;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "PingFang SC",
+          "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+        background: radial-gradient(1200px 600px at 20% 0%, #132449 0%, var(--bg) 60%);
+        color: var(--text);
+      }
+      .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 18px 60px; }
+      .header { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+      .title { font-size: 22px; font-weight: 800; }
+      .subtitle { color: var(--muted); font-size: 13px; }
+      .notice {
+        margin-top: 14px;
+        background: rgba(255, 107, 107, 0.08);
+        border: 1px solid rgba(255, 107, 107, 0.35);
+        padding: 12px 14px;
+        border-radius: 10px;
+        color: #ffd6d6;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .tabs { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+      .tab {
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid rgba(36,50,77,0.9);
+        background: rgba(9, 13, 22, 0.65);
+        color: var(--muted);
+        cursor: pointer;
+        user-select: none;
+        font-weight: 700;
+        font-size: 13px;
+      }
+      .tab.active { background: rgba(90,167,255,0.14); border-color: rgba(90,167,255,0.55); color: var(--text); }
+      .card {
+        margin-top: 14px;
+        background: rgba(18, 26, 42, 0.92);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 14px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 220px;
+        resize: vertical;
+        background: rgba(9, 13, 22, 0.85);
+        border: 1px solid rgba(36,50,77,0.9);
+        color: var(--text);
+        padding: 12px;
+        border-radius: 12px;
+        outline: none;
+        font-size: 13px;
+        line-height: 1.5;
+        box-sizing: border-box;
+      }
+      textarea:focus { border-color: rgba(90,167,255,0.9); box-shadow: 0 0 0 3px rgba(90,167,255,0.15); }
+      input[type="text"], input[type="number"] {
+        width: 100%;
+        background: rgba(9, 13, 22, 0.85);
+        border: 1px solid rgba(36,50,77,0.9);
+        color: var(--text);
+        padding: 10px 10px;
+        border-radius: 10px;
+        outline: none;
+        font-size: 13px;
+        box-sizing: border-box;
+      }
+      input:focus { border-color: rgba(90,167,255,0.9); box-shadow: 0 0 0 3px rgba(90,167,255,0.15); }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+      .row { display: grid; grid-template-columns: 220px 1fr; gap: 10px; align-items: start; margin-top: 10px; }
+      @media (max-width: 860px) { .row { grid-template-columns: 1fr; } }
+      .label { font-weight: 800; font-size: 13px; }
+      .help { color: var(--muted); font-size: 12px; line-height: 1.45; white-space: pre-wrap; margin-top: 6px; }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
+      button {
+        background: linear-gradient(180deg, rgba(90,167,255,1) 0%, rgba(49,122,240,1) 100%);
+        border: none;
+        color: white;
+        padding: 10px 12px;
+        border-radius: 12px;
+        font-weight: 800;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button.secondary {
+        background: rgba(9, 13, 22, 0.6);
+        border: 1px solid rgba(36,50,77,0.9);
+        color: var(--text);
+        font-weight: 700;
+      }
+      .status { font-size: 13px; color: var(--muted); }
+      .status.ok { color: var(--ok); }
+      .status.err { color: var(--danger); }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      code { color: #cfe0ff; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="header">
+        <div class="title">场景创建</div>
+        <div class="subtitle">粘贴文本 / 上传 txt / 按默认字段填表 → 交由 LLM 判断复用或新建</div>
+      </div>
+      <div class="notice">
+        该页面仅用于本机（localhost/127.0.0.1）。提交内容可能包含简历/岗位偏好等敏感信息，请勿截图泄露。\n
+        成功后会返回 <code>scene_id</code>，可在 <a href="/scenes/list">场景列表</a> 查看结构化条目。
+      </div>
+
+      <div class="tabs">
+        <div class="tab active" data-tab="paste">粘贴文本</div>
+        <div class="tab" data-tab="upload">上传 txt/md</div>
+        <div class="tab" data-tab="form">按字段填表</div>
+      </div>
+
+      <div id="panel-paste" class="card">
+        <div class="help">
+          把“求职期望 + 简历/经历概述”等粘贴到下面。后端会写入 <code>data/scene_temp.&lt;timestamp&gt;.txt</code> 并走与 <code>/api/start_from_txt</code> 同源的场景准备逻辑。
+        </div>
+        <textarea id="pasteText" placeholder="例如：\n我希望找后端/AI 开发相关岗位…\n我的经历：…\n期望城市/薪资：…"></textarea>
+        <div class="actions">
+          <button id="btnPasteSubmit">提交并匹配场景</button>
+          <button class="secondary" id="btnPasteClear">清空</button>
+          <span id="statusPaste" class="status"></span>
+        </div>
+        <pre id="resultPaste" class="mono"></pre>
+      </div>
+
+      <div id="panel-upload" class="card" style="display:none">
+        <div class="help">
+          选择一个 <code>.txt</code> 或 <code>.md</code> 文件上传。页面会调用现有 <code>POST /api/start_from_upload</code>。\n
+          说明：后端也支持 pdf/png/jpg/webp，但本页仅推荐 txt/md，便于可控与排障。
+        </div>
+        <input id="uploadFile" type="file" accept=".txt,.md,text/plain,text/markdown" />
+        <div class="actions">
+          <button id="btnUploadSubmit">上传并匹配场景</button>
+          <span id="statusUpload" class="status"></span>
+        </div>
+        <pre id="resultUpload" class="mono"></pre>
+      </div>
+
+      <div id="panel-form" class="card" style="display:none">
+        <div class="help">
+          按 <code>data/default_jobconfig.json</code> 的字段填写基础偏好。页面会将表单组装为一段文本，再调用 <code>POST /api/start_from_text</code>。\n
+          提示：SEARCH_KEYWORD / PREFERRED_CITIES 支持用逗号分隔多个值。
+        </div>
+        <div class="grid">
+          <div>
+            <div class="label">SEARCH_KEYWORD（关键词）</div>
+            <div class="help">例如：后端开发, Python, AI Agent</div>
+            <input id="fSearchKeyword" type="text" placeholder="后端开发, Python" />
+          </div>
+          <div>
+            <div class="label">PREFERRED_CITIES（城市）</div>
+            <div class="help">例如：深圳, 广州（可空）</div>
+            <input id="fCities" type="text" placeholder="深圳, 广州" />
+          </div>
+          <div>
+            <div class="label">PROVINCE（省份）</div>
+            <div class="help">可空</div>
+            <input id="fProvince" type="text" placeholder="" />
+          </div>
+          <div>
+            <div class="label">ACCEPT_REMOTE（接受远程）</div>
+            <div class="help">true/false</div>
+            <input id="fRemote" type="text" placeholder="false" />
+          </div>
+          <div>
+            <div class="label">MIN_SALARY（最低 K）</div>
+            <div class="help">整数</div>
+            <input id="fMinSalary" type="number" min="0" step="1" placeholder="1" />
+          </div>
+          <div>
+            <div class="label">MAX_SALARY（最高 K）</div>
+            <div class="help">整数</div>
+            <input id="fMaxSalary" type="number" min="0" step="1" placeholder="100" />
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <div class="label">补充说明（可选）</div>
+            <div class="help">例如：经验年限、技术栈、管理经验、英语能力等</div>
+          </div>
+          <textarea id="fExtra" placeholder="我有 5 年 Python 后端经验…"></textarea>
+        </div>
+        <div class="actions">
+          <button id="btnFormSubmit">生成文本并匹配场景</button>
+          <button class="secondary" id="btnFormShowText">预览生成文本</button>
+          <span id="statusForm" class="status"></span>
+        </div>
+        <pre id="resultForm" class="mono"></pre>
+      </div>
+    </div>
+
+    <script>
+      function setTab(tab) {
+        document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
+        document.getElementById("panel-paste").style.display = tab === "paste" ? "" : "none";
+        document.getElementById("panel-upload").style.display = tab === "upload" ? "" : "none";
+        document.getElementById("panel-form").style.display = tab === "form" ? "" : "none";
+      }
+
+      document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setTab(t.dataset.tab)));
+
+      function setStatus(id, msg, kind) {
+        const el = document.getElementById(id);
+        el.textContent = msg || "";
+        el.className = "status" + (kind ? " " + kind : "");
+      }
+      function showResult(id, obj) {
+        document.getElementById(id).textContent = obj ? JSON.stringify(obj, null, 2) : "";
+      }
+
+      async function postJson(url, body) {
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const t = await r.text();
+        let j = null;
+        try { j = JSON.parse(t); } catch (_) {}
+        if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+        return j;
+      }
+
+      document.getElementById("btnPasteClear").addEventListener("click", () => {
+        document.getElementById("pasteText").value = "";
+        setStatus("statusPaste", "已清空", "ok");
+        showResult("resultPaste", null);
+      });
+
+      document.getElementById("btnPasteSubmit").addEventListener("click", async () => {
+        setStatus("statusPaste", "提交中…");
+        showResult("resultPaste", null);
+        try {
+          const text = (document.getElementById("pasteText").value || "").trim();
+          const res = await postJson("/api/start_from_text", { text });
+          setStatus("statusPaste", "完成：scene_id=" + res.scene_id, "ok");
+          showResult("resultPaste", res);
+        } catch (e) {
+          setStatus("statusPaste", "失败：" + (e?.message || String(e)), "err");
+        }
+      });
+
+      document.getElementById("btnUploadSubmit").addEventListener("click", async () => {
+        setStatus("statusUpload", "上传中…");
+        showResult("resultUpload", null);
+        try {
+          const f = document.getElementById("uploadFile").files?.[0];
+          if (!f) throw new Error("请选择文件");
+          const fd = new FormData();
+          fd.append("file", f);
+          const r = await fetch("/api/start_from_upload", { method: "POST", body: fd });
+          const t = await r.text();
+          let j = null;
+          try { j = JSON.parse(t); } catch (_) {}
+          if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+          if (j?.code && j.code !== 200) throw new Error(j?.msg || "业务失败");
+          setStatus("statusUpload", "完成：scene_id=" + j.scene_id, "ok");
+          showResult("resultUpload", j);
+        } catch (e) {
+          setStatus("statusUpload", "失败：" + (e?.message || String(e)), "err");
+        }
+      });
+
+      function csvSplit(s) {
+        return (s || "")
+          .split(/[，,]/)
+          .map((x) => x.trim())
+          .filter(Boolean);
+      }
+
+      function buildUserTextFromForm() {
+        const kws = csvSplit(document.getElementById("fSearchKeyword").value);
+        const cities = csvSplit(document.getElementById("fCities").value);
+        const province = (document.getElementById("fProvince").value || "").trim();
+        const remote = (document.getElementById("fRemote").value || "").trim().toLowerCase();
+        const minS = (document.getElementById("fMinSalary").value || "").trim();
+        const maxS = (document.getElementById("fMaxSalary").value || "").trim();
+        const extra = (document.getElementById("fExtra").value || "").trim();
+
+        const lines = [];
+        lines.push("我希望基于以下信息创建或复用求职场景（字段来自 default_jobconfig）：");
+        lines.push("");
+        if (kws.length) lines.push("关键词：" + kws.join("、"));
+        if (cities.length) lines.push("城市：" + cities.join("、"));
+        if (province) lines.push("省份：" + province);
+        if (remote) lines.push("接受远程：" + remote);
+        if (minS || maxS) lines.push("期望薪资（K/月）：" + (minS || "?") + "–" + (maxS || "?"));
+        lines.push("");
+        if (extra) {
+          lines.push("补充说明：");
+          lines.push(extra);
+          lines.push("");
+        }
+        lines.push("如果信息不足请根据常见求职场景合理补全结构化字段，但不要编造我未提供的个人经历。");
+        return lines.join("\n");
+      }
+
+      document.getElementById("btnFormShowText").addEventListener("click", () => {
+        const txt = buildUserTextFromForm();
+        showResult("resultForm", { generated_text_preview: txt });
+        setStatus("statusForm", "已预览生成文本（不会提交）", "ok");
+      });
+
+      document.getElementById("btnFormSubmit").addEventListener("click", async () => {
+        setStatus("statusForm", "提交中…");
+        showResult("resultForm", null);
+        try {
+          const txt = buildUserTextFromForm();
+          const res = await postJson("/api/start_from_text", { text: txt });
+          setStatus("statusForm", "完成：scene_id=" + res.scene_id, "ok");
+          showResult("resultForm", res);
+        } catch (e) {
+          setStatus("statusForm", "失败：" + (e?.message || String(e)), "err");
+        }
+      });
+    </script>
+  </body>
+</html>
+
