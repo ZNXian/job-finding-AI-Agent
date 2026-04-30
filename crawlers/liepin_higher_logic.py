@@ -297,8 +297,30 @@ async def crawl_with_higher_logic(
     restart_after_jobs = 30
     jobs_since_browser_restart = 0
     start_seg_idx = seg_idx
+    last_seg_city_code: Optional[str] = None
     stop_all = False
     while seg_idx < len(plan) and not stop_all:
+        # 进入每个「非偏好城市全集」segment 时重启一次浏览器（pubTime=7），降低长跑被风控概率
+        seg_city_code = str(plan[seg_idx].get("city_code") or "").strip()
+        seg_pub_time = int(plan[seg_idx].get("pubTime", 30) or 30)
+        if seg_pub_time == 7 and seg_city_code and seg_city_code != last_seg_city_code:
+            log.info("进入非偏好城市 segment（pubTime=7 city=%s），重启浏览器以继续爬取", seg_city_code)
+            try:
+                await browser.close()
+            except Exception:
+                pass
+            storage_state = _liepin_storage_state_for_launch()
+            browser = await get_browser(
+                pw,
+                headless=cfg.CRAWL_HEADLESS,
+                storage_state=storage_state,
+            )
+            page = await browser.new_page()
+            await apply_anti_detect_init_scripts(page)
+            login_recovery_used = False
+            jobs_since_browser_restart = 0
+        last_seg_city_code = seg_city_code
+
         current_page = int(list_start) if seg_idx == start_seg_idx else 0
         effective_max_page = max(1, int(max_page))
         loop_upper_page = current_page + effective_max_page
@@ -393,8 +415,20 @@ def _init_crawl_runtime(
         preferred = []
     province_name = str(getattr(cfg, "PROVINCE", "") or "").strip()
     plan: List[Dict[str, Any]] = []
-    for dq in _dqs_for_pub30([str(x) for x in preferred], province_name) or ["010"]:
+    preferred_dqs = _dqs_for_pub30([str(x) for x in preferred], province_name) or ["010"]
+    for dq in preferred_dqs:
         plan.append({"city_code": dq, "pubTime": 30})
+
+    # ACCEPT_REMOTE=True 时：追加「非偏好城市全集」segment（pubTime=7）
+    # 注意：此处以 LIEPIN_CITY_CODE 的 code 为全集，排除 preferred_dqs 中已覆盖的 code。
+    accept_remote = bool(getattr(cfg, "ACCEPT_REMOTE", False))
+    if accept_remote:
+        seen: set[str] = set(str(x) for x in preferred_dqs if str(x))
+        all_codes = sorted({str(v) for v in (LIEPIN_CITY_CODE or {}).values() if str(v).strip()})
+        for code in all_codes:
+            if code in seen:
+                continue
+            plan.append({"city_code": code, "pubTime": 7})
 
     seg_idx, list_start = get_liepin_list_resume(crawl_scene_id, plan, reset=reset_checkpoint)
     seg_idx = max(0, min(int(seg_idx), len(plan) - 1))

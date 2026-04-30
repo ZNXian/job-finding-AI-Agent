@@ -21,6 +21,8 @@ LLM_JOB_FILTER_BATCH_MAX = 15
 _FILTER_JOB_INTRO_MAX_CHARS = 1200
 _FILTER_MY_REQUIREMENT_MAX_CHARS = 2500
 
+LLM_TITLE_PREFILTER_BATCH_MAX = 200
+
 _FILTER_BATCH_SYSTEM = (
     "你是一个严格的数据格式化引擎。用户消息中包含同一批多个岗位（编号从 0 开始连续整数），"
     "须对每个岗位独立判断，不得混淆不同编号。\n"
@@ -45,6 +47,22 @@ _GREETING_BATCH_SYSTEM = (
     "- index: integer，与消息中的岗位序号一致\n"
     "- greeting: string，该岗位对应的一段招呼语\n"
     "items 必须覆盖消息中列出的全部序号，各 index 唯一。\n"
+    "\n"
+    + STRUCTURED_JSON_ENGINE_RULES
+)
+
+_TITLE_PREFILTER_BATCH_SYSTEM = (
+    "你是一个严格的数据格式化引擎。用户消息中包含【场景关键词】与一批岗位信息（编号从 0 开始连续整数）。\n"
+    "请仅基于场景关键词与岗位标题（可选含公司/地点/薪资）做初步判断：\n"
+    "- reject：明显不匹配（例如关键词=Python开发，但标题为 硬件工程师/Java开发/销售 等）\n"
+    "- maybe：不确定，但有可能匹配（保守保留）\n"
+    "- keep：较可能匹配（保留）\n"
+    "\n"
+    "【目标结构】\n"
+    "输出 JSON 对象，键 items 为数组。items 长度必须等于本批岗位数 N。每项必须包含且仅包含：\n"
+    "- index: integer，0 到 N-1\n"
+    "- verdict: string，仅能为 reject/maybe/keep 之一\n"
+    "- reason: string，给出极简原因（不超过 12 个汉字；不要包含“标题预判”前缀）\n"
     "\n"
     + STRUCTURED_JSON_ENGINE_RULES
 )
@@ -119,6 +137,112 @@ def _parse_json_object(raw: str) -> Optional[Dict[str, Any]]:
         return o if isinstance(o, dict) else None
     except json.JSONDecodeError:
         return None
+
+
+def _scene_keywords_for_title_prefilter(scene_id: Optional[int]) -> str:
+    """读取场景 search_keywords 作为标题初筛关键词串。"""
+    if scene_id is None:
+        return ""
+    try:
+        from services.scences import scene_manager
+
+        s = scene_manager.get_scene_by_id(int(scene_id))
+        kws = (s or {}).get("search_keywords") or []
+        if isinstance(kws, list):
+            return "、".join(str(x) for x in kws if str(x).strip())
+        return str(kws or "").strip()
+    except Exception:
+        return ""
+
+
+def _build_title_prefilter_user_message(
+    jobs: List[Dict[str, Any]],
+    *,
+    scene_id: Optional[int],
+    include_company: bool,
+    include_location: bool,
+    include_salary: bool,
+) -> str:
+    kws = _scene_keywords_for_title_prefilter(scene_id) or str(getattr(cfg, "SEARCH_KEYWORD", "") or "").strip()
+    n = len(jobs)
+    last = n - 1
+    lines: List[str] = [
+        f"场景关键词：{kws}",
+        "",
+        f"本批共 {n} 个岗位，编号 0 到 {last}。请按系统要求输出结构化 JSON。",
+        "",
+    ]
+    for i, job in enumerate(jobs):
+        title = str(job.get("标题") or job.get("title") or "").strip()
+        parts = [f"标题：{title}"]
+        if include_company:
+            parts.append(f"公司：{str(job.get('公司') or '').strip()}")
+        if include_location:
+            parts.append(f"地点：{str(job.get('地点') or '').strip()}")
+        if include_salary:
+            parts.append(f"薪资：{str(job.get('薪资') or '').strip()}")
+        lines.append(f"--- 岗位编号 {i} ---")
+        lines.append("\n".join(parts))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def llm_title_prefilter_jobs_batch(
+    jobs: List[Dict[str, Any]],
+    *,
+    scene_id: Optional[int],
+    include_company: bool = False,
+    include_location: bool = False,
+    include_salary: bool = False,
+) -> List[Dict[str, str]]:
+    """
+    标题初筛：仅基于关键词+标题做粗筛，返回与 jobs 等长的 verdict/reason。
+    """
+    if not jobs:
+        return []
+    results: List[Dict[str, str]] = []
+    for start in range(0, len(jobs), LLM_TITLE_PREFILTER_BATCH_MAX):
+        chunk = jobs[start : start + LLM_TITLE_PREFILTER_BATCH_MAX]
+        user = _build_title_prefilter_user_message(
+            chunk,
+            scene_id=scene_id,
+            include_company=include_company,
+            include_location=include_location,
+            include_salary=include_salary,
+        )
+        raw = chat_completion_text(
+            [
+                {"role": "system", "content": _TITLE_PREFILTER_BATCH_SYSTEM},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        data = _parse_json_object(raw) or {}
+        items = data.get("items")
+        if not isinstance(items, list):
+            # 保守：解析失败全部 keep
+            results.extend([{"verdict": "keep", "reason": "解析失败"} for _ in chunk])
+            continue
+        by_idx: Dict[int, Dict[str, Any]] = {}
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            try:
+                idx = int(it.get("index"))
+            except (TypeError, ValueError):
+                continue
+            by_idx[idx] = it
+        for i in range(len(chunk)):
+            it = by_idx.get(i) or {}
+            v = str(it.get("verdict") or "").strip().lower()
+            if v not in ("reject", "maybe", "keep"):
+                v = "keep"
+            r = str(it.get("reason") or "").strip()
+            # reason 留给外部拼 “标题预判：”，这里先控制短
+            r = r[:12]
+            results.append({"verdict": v, "reason": r})
+    return results
 
 
 def _normalize_match_level(s: Any) -> str:

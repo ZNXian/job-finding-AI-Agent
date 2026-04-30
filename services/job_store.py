@@ -465,6 +465,120 @@ def get_unprocessed_crawl_list_jobs_for_llm(
     return out
 
 
+def get_pending_crawl_list_jobs_for_llm(
+    platform: str,
+    scene_id: int,
+) -> List[Dict[str, Any]]:
+    """从 crawl_{platform}.db 的 list_jobs 读取 match_level='pending' 的岗位（用于二阶段详情精筛）。"""
+    platform_name = str(platform or "").strip().lower() or "liepin"
+    conn = _get_crawl_conn(platform_name)
+    with _lock:
+        _ensure_list_jobs_llm_cols(conn)
+        _ensure_list_jobs_salary_col(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                platform,
+                platform_job_id,
+                title,
+                company,
+                salary,
+                location,
+                description,
+                url,
+                fetch_timestamp
+            FROM list_jobs
+            WHERE scene_id = ?
+              AND platform = ?
+              AND match_level = 'pending'
+              AND length(platform_job_id) > 0
+            ORDER BY
+              CASE WHEN fetch_timestamp = '' THEN 1 ELSE 0 END,
+              fetch_timestamp
+            """,
+            (int(scene_id), platform_name),
+        ).fetchall()
+
+    plat_cn = "猎聘" if platform_name == "liepin" else platform_name
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "平台": plat_cn,
+                "platform": platform_name,
+                "platform_job_id": str(r["platform_job_id"] or ""),
+                "标题": str(r["title"] or ""),
+                "公司": str(r["company"] or ""),
+                "薪资": str(r["salary"] or ""),
+                "地点": str(r["location"] or ""),
+                "链接": str(r["url"] or ""),
+                "介绍": str(r["description"] or ""),
+            }
+        )
+    return out
+
+
+def get_crawl_list_jobs_for_title_prefilter(
+    platform: str,
+    scene_id: int,
+    *,
+    include_parse_failed: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    标题初筛专用：从 crawl_{platform}.db 的 list_jobs 读取待初筛岗位（不读取 description，便于大批量低 token）。
+
+    默认筛选：
+      - match_level == ''
+      - (可选) reason == '解析失败'
+    """
+    platform_name = str(platform or "").strip().lower() or "liepin"
+    conn = _get_crawl_conn(platform_name)
+    with _lock:
+        _ensure_list_jobs_llm_cols(conn)
+        _ensure_list_jobs_salary_col(conn)
+        where = "match_level = ''"
+        if include_parse_failed:
+            where = f"({where} OR reason = '解析失败')"
+        rows = conn.execute(
+            f"""
+            SELECT
+                platform_job_id,
+                title,
+                company,
+                salary,
+                location,
+                url,
+                fetch_timestamp
+            FROM list_jobs
+            WHERE scene_id = ?
+              AND platform = ?
+              AND {where}
+              AND length(platform_job_id) > 0
+            ORDER BY
+              CASE WHEN fetch_timestamp = '' THEN 1 ELSE 0 END,
+              fetch_timestamp
+            """,
+            (int(scene_id), platform_name),
+        ).fetchall()
+
+    plat_cn = "猎聘" if platform_name == "liepin" else platform_name
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "平台": plat_cn,
+                "platform": platform_name,
+                "platform_job_id": str(r["platform_job_id"] or ""),
+                "标题": str(r["title"] or ""),
+                "公司": str(r["company"] or ""),
+                "薪资": str(r["salary"] or ""),
+                "地点": str(r["location"] or ""),
+                "链接": str(r["url"] or ""),
+            }
+        )
+    return out
+
+
 def _get_conn() -> sqlite3.Connection:
     # AI 生成
     # 生成目的：懒加载连接并建表

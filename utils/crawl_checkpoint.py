@@ -58,6 +58,22 @@ def _plan_entries_equal(
     return True
 
 
+def _plan_entries_is_prefix(old: List[Dict[str, Any]], new: List[Dict[str, Any]]) -> bool:
+    """判断 old 是否为 new 的前缀（city_code/pubTime 均一致，且 old 更短）。"""
+    if not isinstance(old, list) or not isinstance(new, list):
+        return False
+    if len(old) == 0 or len(old) > len(new):
+        return False
+    for x, y in zip(old, new):
+        if not isinstance(x, dict) or not isinstance(y, dict):
+            return False
+        if str(x.get("city_code", "")) != str(y.get("city_code", "")):
+            return False
+        if int(x.get("pubTime", -1)) != int(y.get("pubTime", -1)):
+            return False
+    return True
+
+
 def _is_valid_liepin_entry(v: Any) -> bool:
     if not isinstance(v, dict):
         return False
@@ -197,12 +213,34 @@ def get_liepin_list_resume(
     entry = scenes.get(str(int(scene_id)))
     if not entry or not _is_valid_liepin_entry(entry):
         return 0, 0
-    if not _plan_entries_equal(entry.get("plan", []), plan):
-        log.info(
-            "断点中 plan 与当前场景构建不一致，从子任务 0 页 0 起: scene_id=%s",
-            scene_id,
-        )
-        return 0, 0
+    saved_plan = entry.get("plan", [])
+    if not _plan_entries_equal(saved_plan, plan):
+        # 兼容：当仅在末尾追加新的 segments（如 ACCEPT_REMOTE 后 pubTime=7 全集）时，不打断断点续爬
+        if _plan_entries_is_prefix(saved_plan, plan):
+            seg_keep = int(entry.get("segment_index", 0))
+            last_keep = int(entry.get("last_list_page", -1))
+            log.info(
+                "断点 plan 为当前 plan 的前缀：自动升级 checkpoint.plan（保留 segment_index=%s last_list_page=%s）scene_id=%s",
+                seg_keep,
+                last_keep,
+                scene_id,
+            )
+            try:
+                set_liepin_list_checkpoint(
+                    int(scene_id),
+                    plan,
+                    seg_keep,
+                    last_keep,
+                    path=path,
+                )
+            except Exception as e:
+                log.warning("自动升级 checkpoint.plan 失败（将继续尝试续爬）: %s", e)
+        else:
+            log.info(
+                "断点中 plan 与当前场景构建不一致，从子任务 0 页 0 起: scene_id=%s",
+                scene_id,
+            )
+            return 0, 0
     seg = int(entry["segment_index"])
     if seg < 0 or seg >= len(plan):
         return 0, 0
