@@ -107,6 +107,9 @@ SCENE_MAX_NUMBER = 99  # 最大场景数量
 REMOTE_KEYWORDS = ["远程", "居家", "灵活", "异地"]
 # ========================== 搜索页面数,测试时控制爬虫量 ==========================
 MAX_PAGE = _env_int("MAX_PAGE", 1)
+# 猎聘列表 URL 参数 pubTime（站点支持如 7、30）：偏好城市段 vs 远程（非偏好）城市段
+LIEPIN_PREFERRED_PUB_TIME = _env_int("LIEPIN_PREFERRED_PUB_TIME", 7)
+LIEPIN_REMOTE_PUB_TIME = _env_int("LIEPIN_REMOTE_PUB_TIME", 30)
 # 猎聘爬虫：True=无头后台运行（不显示浏览器窗口），False=显示窗口便于登录态与调试
 CRAWL_HEADLESS = False
 # ====================== 日志配置（全局唯一） ======================

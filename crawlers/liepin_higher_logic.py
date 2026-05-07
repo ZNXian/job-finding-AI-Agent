@@ -45,7 +45,11 @@ from services.job_store import (
     upsert_crawl_list_job,
 )
 from utils.browser import apply_anti_detect_init_scripts, get_browser, human_behavior, is_trap_job_card
-from utils.crawl_checkpoint import get_liepin_list_resume, set_liepin_list_checkpoint
+from utils.crawl_checkpoint import (
+    get_liepin_list_resume,
+    liepin_scene_has_list_checkpoint,
+    set_liepin_list_checkpoint,
+)
 from utils.filter import hard_filter, check_chatted
 
 LIEPIN_JOB_PLATFORM = "liepin"
@@ -54,7 +58,6 @@ LIEPIN_JOB_PLATFORM = "liepin"
 LIEPIN_CITY_CODE: Dict[str, str] = {
 "北京": "010",
     "上海": "020",
-    "广东": "050",
     "珠海": "050140",
     "深圳": "050090",
     "广州": "050020",
@@ -96,6 +99,7 @@ LIEPIN_CITY_CODE: Dict[str, str] = {
     "香港": "320",
     "澳门": "330",
     "台湾": "340",
+    "广东": "050",
 }
 
 
@@ -286,7 +290,16 @@ async def crawl_with_higher_logic(
     reset_checkpoint: bool,
 ) -> List[Dict[str, Any]]:
     """对齐 legacy：构 plan → 断点续爬 → 列表页硬筛 → 详情批处理 → 写 checkpoint。"""
-    crawl_scene_id, encoded_key, salary_code, plan, seg_idx, list_start, max_page = _init_crawl_runtime(
+    (
+        crawl_scene_id,
+        encoded_key,
+        salary_code,
+        plan,
+        seg_idx,
+        list_start,
+        max_page,
+        persist_checkpoint,
+    ) = _init_crawl_runtime(
         scene_id=scene_id,
         reset_checkpoint=reset_checkpoint,
     )
@@ -300,11 +313,22 @@ async def crawl_with_higher_logic(
     last_seg_city_code: Optional[str] = None
     stop_all = False
     while seg_idx < len(plan) and not stop_all:
-        # 进入每个「非偏好城市全集」segment 时重启一次浏览器（pubTime=7），降低长跑被风控概率
+        # 进入每个远程（非偏好）城市 segment 时重启一次浏览器，降低长跑被风控概率
         seg_city_code = str(plan[seg_idx].get("city_code") or "").strip()
-        seg_pub_time = int(plan[seg_idx].get("pubTime", 30) or 30)
-        if seg_pub_time == 7 and seg_city_code and seg_city_code != last_seg_city_code:
-            log.info("进入非偏好城市 segment（pubTime=7 city=%s），重启浏览器以继续爬取", seg_city_code)
+        seg_pub_time = int(
+            plan[seg_idx].get("pubTime", cfg.LIEPIN_PREFERRED_PUB_TIME)
+            or cfg.LIEPIN_PREFERRED_PUB_TIME
+        )
+        if (
+            seg_pub_time == cfg.LIEPIN_REMOTE_PUB_TIME
+            and seg_city_code
+            and seg_city_code != last_seg_city_code
+        ):
+            log.info(
+                "进入非偏好城市 segment（pubTime=%s city=%s），重启浏览器以继续爬取",
+                cfg.LIEPIN_REMOTE_PUB_TIME,
+                seg_city_code,
+            )
             try:
                 await browser.close()
             except Exception:
@@ -397,7 +421,8 @@ async def crawl_with_higher_logic(
                 await apply_anti_detect_init_scripts(page)
                 login_recovery_used = False
                 jobs_since_browser_restart = 0
-            set_liepin_list_checkpoint(crawl_scene_id, plan, seg_idx, current_page)
+            if persist_checkpoint:
+                set_liepin_list_checkpoint(crawl_scene_id, plan, seg_idx, current_page)
             current_page += 1
 
         seg_idx += 1
@@ -411,8 +436,8 @@ def _init_crawl_runtime(
     *,
     scene_id: Optional[int],
     reset_checkpoint: bool,
-) -> Tuple[int, str, str, List[Dict[str, Any]], int, int, int]:
-    """初始化本轮爬取上下文：scene/plan/断点/分页。"""
+) -> Tuple[int, str, str, List[Dict[str, Any]], int, int, int, bool]:
+    """初始化本轮爬取上下文：scene/plan/断点/分页/是否写 checkpoint 文件。"""
     crawl_scene_id = int(scene_id) if scene_id is not None else 0
 
     def _parse_keywords(raw: Any) -> List[str]:
@@ -454,11 +479,14 @@ def _init_crawl_runtime(
         preferred = []
     province_name = str(getattr(cfg, "PROVINCE", "") or "").strip()
     base_segments: List[Dict[str, Any]] = []
+    preferred_pub = int(cfg.LIEPIN_PREFERRED_PUB_TIME)
+    remote_pub = int(cfg.LIEPIN_REMOTE_PUB_TIME)
+
     preferred_dqs = _dqs_for_pub30([str(x) for x in preferred], province_name) or ["010"]
     for dq in preferred_dqs:
-        base_segments.append({"city_code": dq, "pubTime": 30})
+        base_segments.append({"city_code": dq, "pubTime": preferred_pub})
 
-    # ACCEPT_REMOTE=True 时：追加「非偏好城市全集」segment（pubTime=7）
+    # ACCEPT_REMOTE=True 时：追加「非偏好城市全集」segment（pubTime 见 LIEPIN_REMOTE_PUB_TIME）
     # 注意：此处以 LIEPIN_CITY_CODE 的 code 为全集，排除 preferred_dqs 中已覆盖的 code。
     accept_remote = bool(getattr(cfg, "ACCEPT_REMOTE", False))
     if accept_remote:
@@ -467,7 +495,7 @@ def _init_crawl_runtime(
         for code in all_codes:
             if code in seen:
                 continue
-            base_segments.append({"city_code": code, "pubTime": 7})
+            base_segments.append({"city_code": code, "pubTime": remote_pub})
 
     # 关键：按 city_segment → keyword 的顺序展开 plan
     plan: List[Dict[str, Any]] = []
@@ -476,15 +504,36 @@ def _init_crawl_runtime(
             plan.append(
                 {
                     "city_code": str(seg.get("city_code") or "").strip(),
-                    "pubTime": int(seg.get("pubTime", 30) or 30),
+                    "pubTime": int(seg.get("pubTime", preferred_pub) or preferred_pub),
                     "keyword": str(kw or "").strip(),
                 }
             )
 
-    seg_idx, list_start = get_liepin_list_resume(crawl_scene_id, plan, reset=reset_checkpoint)
+    had_checkpoint = liepin_scene_has_list_checkpoint(crawl_scene_id)
+    persist_checkpoint = bool(reset_checkpoint or not had_checkpoint)
+    if not persist_checkpoint:
+        log.info(
+            "本轮续爬已存在有效断点：本进程内不写 checkpoint.json（每页仍正常爬取）scene_id=%s",
+            crawl_scene_id,
+        )
+    seg_idx, list_start = get_liepin_list_resume(
+        crawl_scene_id,
+        plan,
+        reset=reset_checkpoint,
+        persist_checkpoint=persist_checkpoint,
+    )
     seg_idx = max(0, min(int(seg_idx), len(plan) - 1))
     max_page = int(getattr(cfg, "MAX_PAGE", 1) or 1)
-    return crawl_scene_id, encoded_key, salary_code, plan, seg_idx, int(list_start), max_page
+    return (
+        crawl_scene_id,
+        encoded_key,
+        salary_code,
+        plan,
+        seg_idx,
+        int(list_start),
+        max_page,
+        persist_checkpoint,
+    )
 
 
 def _build_list_url(
@@ -495,7 +544,10 @@ def _build_list_url(
     salary_code: str,
 ) -> str:
     city_dq = str(plan_item.get("city_code"))
-    pub_time = int(plan_item.get("pubTime", 30))
+    pub_time = int(
+        plan_item.get("pubTime", cfg.LIEPIN_PREFERRED_PUB_TIME)
+        or cfg.LIEPIN_PREFERRED_PUB_TIME
+    )
     kw = str(plan_item.get("keyword") or "").strip()
     key_encoded = urllib.parse.quote(kw) if kw else str(encoded_key or "")
     return (

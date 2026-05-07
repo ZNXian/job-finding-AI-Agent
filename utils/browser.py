@@ -162,7 +162,7 @@ async def human_behavior(page,d_long_use=True) -> None:
         # 1. 偶尔的长休息（5%概率）
         if random.random() < 0.05:
             d_long = random.uniform(20.0, 60.0)
-            log.debug(f"长休息 {d_long:.1f}秒")
+            log.info(f"长休息 {d_long:.1f}秒")
             await asyncio.sleep(d_long)
             
             return  # 长休息后直接返回，不再执行其他动作

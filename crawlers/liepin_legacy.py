@@ -533,7 +533,7 @@ def _dqs_for_pub30(preferred_name_list: List[str], province_name: str) -> List[s
 
 def _all_dq_from_preferred_cities_only(preferred_name_list: List[str]) -> List[str]:
     # AI 生成
-    # 生成目的：accept_remote 的 pubTime=7 段使用「各期望城市名」在表中的全部编码（去重保序，不含省 fallback）
+    # 生成目的：accept_remote 的远程段（pubTime=LIEPIN_REMOTE_PUB_TIME）使用「各期望城市名」在表中的全部编码（去重保序，不含省 fallback）
     out: List[str] = []
     seen: set[str] = set()
     for n in preferred_name_list:
@@ -835,17 +835,20 @@ def _crawl_liepin(
     province = str(getattr(cfg, "PROVINCE", "") or "").strip()
     accept_remote = bool(getattr(cfg, "ACCEPT_REMOTE", False))
 
+    preferred_pub = int(getattr(cfg, "LIEPIN_PREFERRED_PUB_TIME", 7))
+    remote_pub = int(getattr(cfg, "LIEPIN_REMOTE_PUB_TIME", 30))
+
     dqs_30 = _dqs_for_pub30(preferred, province)
     used_30 = set(dqs_30)
     # AI 生成
     # 生成目的：与列表任务顺序一一对应，供断点记录全量 city_code+pubTime 及当前子任务
     plan: List[Dict[str, Any]] = [
-        {"city_code": dq, "pubTime": 30} for dq in dqs_30
+        {"city_code": dq, "pubTime": preferred_pub} for dq in dqs_30
     ]
     if accept_remote:
         for dq in _all_dq_from_preferred_cities_only(preferred):
             if dq not in used_30:
-                plan.append({"city_code": dq, "pubTime": 7})
+                plan.append({"city_code": dq, "pubTime": remote_pub})
     n_plan = len(plan)
     if not plan:
         log.info(

@@ -227,15 +227,27 @@ def _get_platform_block(root: Dict[str, Any], platform: str) -> Dict[str, Any]:
     return {"platform": key, _SCENES_KEY: {}}
 
 
+def liepin_scene_has_list_checkpoint(
+    scene_id: int, *, path: Optional[Path] = None
+) -> bool:
+    """磁盘上是否存在该场景的有效猎聘列表断点（不含 reset 语义）。"""
+    root = load_checkpoint_document(path)
+    scenes = _get_platform_block(root, _DEFAULT_PLATFORM).get(_SCENES_KEY, {})
+    entry = scenes.get(str(int(scene_id)))
+    return bool(entry and _is_valid_liepin_entry(entry))
+
+
 def get_liepin_list_resume(
     scene_id: int,
     plan: List[Dict[str, Any]],
     *,
     reset: bool = False,
+    persist_checkpoint: bool = True,
     path: Optional[Path] = None,
 ) -> Tuple[int, int]:
     """
     从断点得到本次猎聘列表爬起位置。
+    :param persist_checkpoint: 为 False 时不写 checkpoint 文件（仅内存计算续爬位置，用于「有断点续爬不改动文件」）。
     :return: (segment_index, list_start) — 从 plan[segment] 的列表第 list_start 页起抓（0 基）；reset 或无效则 (0,0)。
     """
     if not plan:
@@ -251,6 +263,8 @@ def get_liepin_list_resume(
     entry = scenes.get(str(int(scene_id)))
     if not entry or not _is_valid_liepin_entry(entry):
         return 0, 0
+    resume_seg = int(entry["segment_index"])
+    resume_last = int(entry["last_list_page"])
     saved_plan = entry.get("plan", [])
     if not _plan_entries_equal(saved_plan, plan):
         # 兼容：当仅在末尾追加新的 segments（如 ACCEPT_REMOTE 后 pubTime=7 全集）时，不打断断点续爬
@@ -263,16 +277,22 @@ def get_liepin_list_resume(
                 last_keep,
                 scene_id,
             )
-            try:
-                set_liepin_list_checkpoint(
-                    int(scene_id),
-                    plan,
-                    seg_keep,
-                    last_keep,
-                    path=path,
+            if persist_checkpoint:
+                try:
+                    set_liepin_list_checkpoint(
+                        int(scene_id),
+                        plan,
+                        seg_keep,
+                        last_keep,
+                        path=path,
+                    )
+                except Exception as e:
+                    log.warning("自动升级 checkpoint.plan 失败（将继续尝试续爬）: %s", e)
+            else:
+                log.info(
+                    "续爬冻结断点文件：跳过将 plan 前缀升级写入 checkpoint scene_id=%s",
+                    scene_id,
                 )
-            except Exception as e:
-                log.warning("自动升级 checkpoint.plan 失败（将继续尝试续爬）: %s", e)
         else:
             # 兼容：旧 checkpoint.plan 不含 keyword 的场景（旧计划仅按 city_code/pubTime 分段）
             # 将旧 segment_index 映射到新 plan：new_segment_index = old_segment_index * keyword_count（默认对应该城市段的第一个 keyword）
@@ -303,6 +323,8 @@ def get_liepin_list_resume(
                     seg_keep = int(entry.get("segment_index", 0))
                     last_keep = int(entry.get("last_list_page", -1))
                     new_seg = max(0, seg_keep * kw_count)
+                    resume_seg = new_seg
+                    resume_last = last_keep
                     log.info(
                         "旧断点 plan 不含 keyword：自动升级到 keyword 版 plan（segment_index %s→%s last_list_page=%s）scene_id=%s",
                         seg_keep,
@@ -310,26 +332,32 @@ def get_liepin_list_resume(
                         last_keep,
                         scene_id,
                     )
-                    try:
-                        set_liepin_list_checkpoint(
-                            int(scene_id),
-                            plan,
-                            new_seg,
-                            last_keep,
-                            path=path,
+                    if persist_checkpoint:
+                        try:
+                            set_liepin_list_checkpoint(
+                                int(scene_id),
+                                plan,
+                                new_seg,
+                                last_keep,
+                                path=path,
+                            )
+                        except Exception as e:
+                            log.warning("旧断点自动升级失败（将继续尝试续爬）: %s", e)
+                    else:
+                        log.info(
+                            "续爬冻结断点文件：跳过将无 keyword 断点升级写入 checkpoint scene_id=%s",
+                            scene_id,
                         )
-                    except Exception as e:
-                        log.warning("旧断点自动升级失败（将继续尝试续爬）: %s", e)
                 else:
                     log.info(
                         "断点中 plan 与当前场景构建不一致，从子任务 0 页 0 起: scene_id=%s",
                         scene_id,
                     )
                     return 0, 0
-    seg = int(entry["segment_index"])
+    seg = resume_seg
     if seg < 0 or seg >= len(plan):
         return 0, 0
-    last = int(entry["last_list_page"])
+    last = resume_last
     if last < 0:
         return seg, 0
     nxt = last + 1
