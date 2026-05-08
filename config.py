@@ -110,6 +110,9 @@ MAX_PAGE = _env_int("MAX_PAGE", 1)
 # 猎聘列表 URL 参数 pubTime（站点支持如 7、30）：偏好城市段 vs 远程（非偏好）城市段
 LIEPIN_PREFERRED_PUB_TIME = _env_int("LIEPIN_PREFERRED_PUB_TIME", 7)
 LIEPIN_REMOTE_PUB_TIME = _env_int("LIEPIN_REMOTE_PUB_TIME", 30)
+# 猎聘 page.goto 滑动窗口：窗口内最多次数；0 表示关闭限速
+LIEPIN_MAX_NAV_PER_HOUR = _env_int("LIEPIN_MAX_NAV_PER_HOUR", 100)
+LIEPIN_NAV_WINDOW_SEC = _env_int("LIEPIN_NAV_WINDOW_SEC", 3600)
 # 猎聘爬虫：True=无头后台运行（不显示浏览器窗口），False=显示窗口便于登录态与调试
 CRAWL_HEADLESS = False
 # ====================== 日志配置（全局唯一） ======================

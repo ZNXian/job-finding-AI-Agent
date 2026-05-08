@@ -11,8 +11,10 @@
 - 页面行为拟人化：`human_behavior`
 - 反检测注入：`apply_anti_detect_init_scripts`（新页面先注入再访问）
 - 登录态自愈：检测登录页后自动登录恢复并回到列表 URL
+- 风控/验证码页：根据正文关键词识别后停止列表爬取（避免死等 .job-list-box）
 - 异常兜底：`TargetClosedError` 手动关窗可安全返回已收集结果
 - 长跑策略：累计岗位达到阈值后重启浏览器上下文再继续爬取
+- 导航限速：滑动窗口内 ``page.goto`` 次数上限，触顶则等待（见 ``utils.liepin_nav_rate_limit``）
 
 说明：
 - legacy 备份文件不修改；本文件为 async 主逻辑实现
@@ -31,7 +33,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from playwright.async_api import Error
+from playwright.async_api import Error, TimeoutError as PlaywrightTimeoutError
 from playwright._impl._errors import TargetClosedError
 from playwright_stealth import stealth_async
 
@@ -51,6 +53,7 @@ from utils.crawl_checkpoint import (
     set_liepin_list_checkpoint,
 )
 from utils.filter import hard_filter, check_chatted
+from utils.liepin_nav_rate_limit import await_liepin_navigation_slot
 
 LIEPIN_JOB_PLATFORM = "liepin"
 
@@ -186,6 +189,37 @@ async def _is_liepin_login_page(page) -> bool:
     return False
 
 
+async def _liepin_list_page_text_slice(page, limit: int = 8000) -> str:
+    try:
+        t = await page.evaluate(
+            """(lim) => (document.body && document.body.innerText)
+                ? document.body.innerText.slice(0, lim) : ''""",
+            limit,
+        )
+        return (t or "").strip()
+    except Exception:
+        return ""
+
+
+async def _is_liepin_rate_limit_or_captcha_page(page) -> bool:
+    """风控/频控/短信验证码等非正常列表页（通常无 .job-list-box）。"""
+    snippet = await _liepin_list_page_text_slice(page, 8000)
+    if not snippet:
+        return False
+    markers = (
+        "访问次数过多",
+        "访问过于频繁",
+        "操作过于频繁",
+        "请求过于频繁",
+        "请输入验证码",
+        "获取验证码",
+        "安全验证",
+        "人机验证",
+        "验证码",
+    )
+    return any(m in snippet for m in markers)
+
+
 # async def _liepin_random_nav_delay() -> None:
 #     d = random.uniform(10.0, 20.0)
 #     log.info("页面切换随机等待 %.1f 秒（反爬节奏）", d)
@@ -240,6 +274,7 @@ async def _liepin_recover_list_login(
         return browser, page, login_recovery_used, False, False
     login_recovery_used = True
     try:
+        await await_liepin_navigation_slot()
         await page.goto(list_url, timeout=60000, wait_until="domcontentloaded")
     except TargetClosedError:
         log.info("检测到浏览器被手动关闭：停止登录恢复并返回已收集岗位")
@@ -250,6 +285,12 @@ async def _liepin_recover_list_login(
     # await _liepin_random_nav_delay()
     if await _is_liepin_login_page(page):
         log.error("登录恢复后列表仍为登录页，停止翻页")
+        return browser, page, login_recovery_used, False, False
+    if await _is_liepin_rate_limit_or_captcha_page(page):
+        log.warning(
+            "登录恢复后页面为猎聘风控/验证码相关文案，停止翻页 url=%s",
+            getattr(page, "url", None),
+        )
         return browser, page, login_recovery_used, False, False
     return browser, page, login_recovery_used, True, True
 
@@ -272,6 +313,8 @@ async def _recover_login_and_load_list_cards(
         )
         return browser, page, login_recovery_used, None
     items = await _get_list_cards(page)
+    if items is None:
+        return browser, page, login_recovery_used, None
     if not items:
         log.info(
             "列表页提前退出：job_list_box 下未找到 items(.job-card-pc-container) url=%s",
@@ -298,7 +341,6 @@ async def crawl_with_higher_logic(
         seg_idx,
         list_start,
         max_page,
-        persist_checkpoint,
     ) = _init_crawl_runtime(
         scene_id=scene_id,
         reset_checkpoint=reset_checkpoint,
@@ -367,6 +409,7 @@ async def crawl_with_higher_logic(
             )
             kept: List[Dict[str, Any]] = []
             try:
+                await await_liepin_navigation_slot()
                 await page.goto(list_url, timeout=60000, wait_until="domcontentloaded")
                 await human_behavior(page, d_long_use=False)
                 browser, page, login_recovery_used, items = await _recover_login_and_load_list_cards(
@@ -421,8 +464,7 @@ async def crawl_with_higher_logic(
                 await apply_anti_detect_init_scripts(page)
                 login_recovery_used = False
                 jobs_since_browser_restart = 0
-            if persist_checkpoint:
-                set_liepin_list_checkpoint(crawl_scene_id, plan, seg_idx, current_page)
+            set_liepin_list_checkpoint(crawl_scene_id, plan, seg_idx, current_page)
             current_page += 1
 
         seg_idx += 1
@@ -436,8 +478,12 @@ def _init_crawl_runtime(
     *,
     scene_id: Optional[int],
     reset_checkpoint: bool,
-) -> Tuple[int, str, str, List[Dict[str, Any]], int, int, int, bool]:
-    """初始化本轮爬取上下文：scene/plan/断点/分页/是否写 checkpoint 文件。"""
+) -> Tuple[int, str, str, List[Dict[str, Any]], int, int, int]:
+    """初始化本轮爬取上下文：scene/plan/断点/分页。
+
+    读断点时的 plan 自动升级是否写盘由 ``get_liepin_list_resume(..., persist_checkpoint=...)`` 单独控制；
+    列表翻页进度始终在每页完成后写入 checkpoint。
+    """
     crawl_scene_id = int(scene_id) if scene_id is not None else 0
 
     def _parse_keywords(raw: Any) -> List[str]:
@@ -510,17 +556,17 @@ def _init_crawl_runtime(
             )
 
     had_checkpoint = liepin_scene_has_list_checkpoint(crawl_scene_id)
-    persist_checkpoint = bool(reset_checkpoint or not had_checkpoint)
-    if not persist_checkpoint:
+    persist_plan_upgrade_writes = bool(reset_checkpoint or not had_checkpoint)
+    if not persist_plan_upgrade_writes:
         log.info(
-            "本轮续爬已存在有效断点：本进程内不写 checkpoint.json（每页仍正常爬取）scene_id=%s",
+            "本轮续爬已存在有效断点：读断点时不将 plan 自动升级写入 checkpoint（列表翻页仍每页更新断点）scene_id=%s",
             crawl_scene_id,
         )
     seg_idx, list_start = get_liepin_list_resume(
         crawl_scene_id,
         plan,
         reset=reset_checkpoint,
-        persist_checkpoint=persist_checkpoint,
+        persist_checkpoint=persist_plan_upgrade_writes,
     )
     seg_idx = max(0, min(int(seg_idx), len(plan) - 1))
     max_page = int(getattr(cfg, "MAX_PAGE", 1) or 1)
@@ -532,7 +578,6 @@ def _init_crawl_runtime(
         seg_idx,
         int(list_start),
         max_page,
-        persist_checkpoint,
     )
 
 
@@ -686,6 +731,7 @@ async def extract_job_description(page, startfrom=50, endto=500):
 
 async def _load_job_detail_page(page, job: Dict[str, Any]) -> bool:
     """详情页打开 + 人类行为模拟 + 聊天过滤。"""
+    await await_liepin_navigation_slot()
     await page.goto(job["链接"], timeout=60000, wait_until="domcontentloaded")
     await human_behavior(page)
     page_text = await page.evaluate("() => document.body.innerText") or ""
@@ -714,9 +760,28 @@ def _persist_passed_job(job: Dict[str, Any], crawl_scene_id: int) -> None:
         log.debug("写入详情岗位到 SQLite 失败: %s", ex)
 
 
-async def _get_list_cards(page):
-    """获取当前列表页岗位卡片集合；找不到容器或卡片时返回空列表。"""
-    job_list_box = await page.wait_for_selector(".job-list-box", timeout=10000)
+async def _get_list_cards(page) -> Optional[List[Any]]:
+    """获取当前列表页岗位卡片元素列表。
+
+    - 正常有容器：返回 `.job-card-pc-container` 列表（可能为空列表）。
+    - 风控/验证码/频控页：返回 ``None``，调用方应停止爬取（已打 warning）。
+    """
+    if await _is_liepin_rate_limit_or_captcha_page(page):
+        log.warning(
+            "猎聘列表页检测到风控或验证码相关文案，停止爬取（不等待 .job-list-box）url=%s",
+            getattr(page, "url", None),
+        )
+        return None
+    try:
+        job_list_box = await page.wait_for_selector(".job-list-box", timeout=10000)
+    except PlaywrightTimeoutError:
+        if await _is_liepin_rate_limit_or_captcha_page(page):
+            log.warning(
+                "等待 .job-list-box 超时且页面含风控/验证码相关文案，停止爬取 url=%s",
+                getattr(page, "url", None),
+            )
+            return None
+        raise
     if not job_list_box:
         return []
     return await job_list_box.query_selector_all(".job-card-pc-container")

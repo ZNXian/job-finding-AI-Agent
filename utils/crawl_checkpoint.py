@@ -247,7 +247,7 @@ def get_liepin_list_resume(
 ) -> Tuple[int, int]:
     """
     从断点得到本次猎聘列表爬起位置。
-    :param persist_checkpoint: 为 False 时不写 checkpoint 文件（仅内存计算续爬位置，用于「有断点续爬不改动文件」）。
+    :param persist_checkpoint: 为 False 时跳过读断点时的 plan 自动升级写盘（仅内存续爬位置）；列表翻页进度由爬虫每页 ``set_liepin_list_checkpoint`` 单独写入。
     :return: (segment_index, list_start) — 从 plan[segment] 的列表第 list_start 页起抓（0 基）；reset 或无效则 (0,0)。
     """
     if not plan:
