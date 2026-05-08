@@ -4,164 +4,82 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>场景创建（粘贴/上传/表单）</title>
-    <style>
-      :root {
-        --bg: #0b0f19;
-        --panel: #121a2a;
-        --text: #e7eefc;
-        --muted: #a9b6d3;
-        --border: #24324d;
-        --accent: #5aa7ff;
-        --danger: #ff6b6b;
-        --ok: #39d98a;
-      }
-      body {
-        margin: 0;
-        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "PingFang SC",
-          "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
-        background: radial-gradient(1200px 600px at 20% 0%, #132449 0%, var(--bg) 60%);
-        color: var(--text);
-      }
-      .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 18px 60px; }
-      .header { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
-      .title { font-size: 22px; font-weight: 800; }
-      .subtitle { color: var(--muted); font-size: 13px; }
-      .notice {
-        margin-top: 14px;
-        background: rgba(255, 107, 107, 0.08);
-        border: 1px solid rgba(255, 107, 107, 0.35);
-        padding: 12px 14px;
-        border-radius: 10px;
-        color: #ffd6d6;
-        font-size: 13px;
-        line-height: 1.5;
-      }
-      .tabs { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
-      .tab {
-        padding: 10px 12px;
-        border-radius: 12px;
-        border: 1px solid rgba(36,50,77,0.9);
-        background: rgba(9, 13, 22, 0.65);
-        color: var(--muted);
-        cursor: pointer;
-        user-select: none;
-        font-weight: 700;
-        font-size: 13px;
-      }
-      .tab.active { background: rgba(90,167,255,0.14); border-color: rgba(90,167,255,0.55); color: var(--text); }
-      .card {
-        margin-top: 14px;
-        background: rgba(18, 26, 42, 0.92);
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        padding: 14px;
-      }
-      textarea {
-        width: 100%;
-        min-height: 220px;
-        resize: vertical;
-        background: rgba(9, 13, 22, 0.85);
-        border: 1px solid rgba(36,50,77,0.9);
-        color: var(--text);
-        padding: 12px;
-        border-radius: 12px;
-        outline: none;
-        font-size: 13px;
-        line-height: 1.5;
-        box-sizing: border-box;
-      }
-      textarea:focus { border-color: rgba(90,167,255,0.9); box-shadow: 0 0 0 3px rgba(90,167,255,0.15); }
-      input[type="text"], input[type="number"] {
-        width: 100%;
-        background: rgba(9, 13, 22, 0.85);
-        border: 1px solid rgba(36,50,77,0.9);
-        color: var(--text);
-        padding: 10px 10px;
-        border-radius: 10px;
-        outline: none;
-        font-size: 13px;
-        box-sizing: border-box;
-      }
-      input:focus { border-color: rgba(90,167,255,0.9); box-shadow: 0 0 0 3px rgba(90,167,255,0.15); }
-      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
-      .row { display: grid; grid-template-columns: 220px 1fr; gap: 10px; align-items: start; margin-top: 10px; }
-      @media (max-width: 860px) { .row { grid-template-columns: 1fr; } }
-      .label { font-weight: 800; font-size: 13px; }
-      .help { color: var(--muted); font-size: 12px; line-height: 1.45; white-space: pre-wrap; margin-top: 6px; }
-      .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
-      button {
-        background: linear-gradient(180deg, rgba(90,167,255,1) 0%, rgba(49,122,240,1) 100%);
-        border: none;
-        color: white;
-        padding: 10px 12px;
-        border-radius: 12px;
-        font-weight: 800;
-        cursor: pointer;
-        font-size: 13px;
-      }
-      button.secondary {
-        background: rgba(9, 13, 22, 0.6);
-        border: 1px solid rgba(36,50,77,0.9);
-        color: var(--text);
-        font-weight: 700;
-      }
-      .status { font-size: 13px; color: var(--muted); }
-      .status.ok { color: var(--ok); }
-      .status.err { color: var(--danger); }
-      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-      code { color: #cfe0ff; }
-    </style>
+    <link rel="stylesheet" href="/static/css/common.css" />
   </head>
-  <body>
+  <body class="page-enter">
     <div class="wrap">
       <div class="header">
-        <div class="title">场景创建</div>
-        <div class="subtitle">粘贴文本 / 上传 txt / 按默认字段填表 → 交由 LLM 判断复用或新建</div>
+        <div class="header-main">
+          <div class="iconTitle" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+              <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
+            </svg>
+          </div>
+          <div>
+            <div class="title">场景创建</div>
+            <div class="subtitle">粘贴文本 / 上传 txt / 按默认字段填表 → 交由 LLM 判断复用或新建</div>
+          </div>
+        </div>
       </div>
-      <div class="notice">
-        该页面仅用于本机（localhost/127.0.0.1）。提交内容可能包含简历/岗位偏好等敏感信息，请勿截图泄露。\n
-        成功后会返回 <code>scene_id</code>，可在 <a href="/scenes/list">场景列表</a> 查看结构化条目。
+      <div class="notice" role="status">
+        <span class="notice__icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          </svg>
+        </span>
+        <span>
+          该页面仅用于本机（localhost/127.0.0.1）。提交内容可能包含简历/岗位偏好等敏感信息，请勿截图泄露。<br />
+          成功后会返回 <code>scene_id</code>，可在 <a href="/scenes/list">场景列表</a> 查看结构化条目。
+        </span>
       </div>
 
       <div class="tabs">
-        <div class="tab active" data-tab="paste">粘贴文本</div>
-        <div class="tab" data-tab="upload">上传 txt/md</div>
-        <div class="tab" data-tab="form">按字段填表</div>
+        <div class="tab active" data-tab="paste" role="tab" tabindex="0">粘贴文本</div>
+        <div class="tab" data-tab="upload" role="tab" tabindex="0">上传 txt/md</div>
+        <div class="tab" data-tab="form" role="tab" tabindex="0">按字段填表</div>
       </div>
 
-      <div id="panel-paste" class="card">
+      <div id="panel-paste" class="card" role="tabpanel">
         <div class="help">
-          把“求职期望 + 简历/经历概述”等粘贴到下面。后端会写入 <code>data/scene_temp.&lt;timestamp&gt;.txt</code> 并走与 <code>/api/start_from_txt</code> 同源的场景准备逻辑。
+          把「求职期望 + 简历/经历概述」等粘贴到下面。后端会写入 <code>data/scene_temp.&lt;timestamp&gt;.txt</code> 并走与 <code>/api/start_from_txt</code> 同源的场景准备逻辑。
         </div>
-        <textarea id="pasteText" placeholder="例如：\n我希望找后端/AI 开发相关岗位…\n我的经历：…\n期望城市/薪资：…"></textarea>
+        <textarea
+          id="pasteText"
+          placeholder="例如：
+我希望找后端/AI 开发相关岗位…
+我的经历：…
+期望城市/薪资：…"
+        ></textarea>
         <div class="actions">
-          <button id="btnPasteSubmit">提交并匹配场景</button>
-          <button class="secondary" id="btnPasteClear">清空</button>
+          <button type="button" id="btnPasteSubmit">提交并匹配场景</button>
+          <button type="button" class="secondary" id="btnPasteClear">清空</button>
           <span id="statusPaste" class="status"></span>
         </div>
-        <pre id="resultPaste" class="mono"></pre>
+        <pre id="resultPaste" class="mono small"></pre>
       </div>
 
-      <div id="panel-upload" class="card" style="display:none">
+      <div id="panel-upload" class="card" style="display: none" role="tabpanel">
         <div class="help">
-          选择一个 <code>.txt</code> 或 <code>.md</code> 文件上传。页面会调用现有 <code>POST /api/start_from_upload</code>。\n
+          选择一个 <code>.txt</code> 或 <code>.md</code> 文件上传。页面会调用现有 <code>POST /api/start_from_upload</code>。<br />
           说明：后端也支持 pdf/png/jpg/webp，但本页仅推荐 txt/md，便于可控与排障。
         </div>
-        <input id="uploadFile" type="file" accept=".txt,.md,text/plain,text/markdown" />
+        <div class="fileRow">
+          <input id="uploadFile" type="file" accept=".txt,.md,text/plain,text/markdown" />
+        </div>
         <div class="actions">
-          <button id="btnUploadSubmit">上传并匹配场景</button>
+          <button type="button" id="btnUploadSubmit">上传并匹配场景</button>
           <span id="statusUpload" class="status"></span>
         </div>
-        <pre id="resultUpload" class="mono"></pre>
+        <pre id="resultUpload" class="mono small"></pre>
       </div>
 
-      <div id="panel-form" class="card" style="display:none">
+      <div id="panel-form" class="card" style="display: none" role="tabpanel">
         <div class="help">
-          按 <code>data/default_jobconfig.json</code> 的字段填写基础偏好。页面会将表单组装为一段文本，再调用 <code>POST /api/start_from_text</code>。\n
+          按 <code>data/default_jobconfig.json</code> 的字段填写基础偏好。页面会将表单组装为一段文本，再调用 <code>POST /api/start_from_text</code>。<br />
           提示：SEARCH_KEYWORD / PREFERRED_CITIES 支持用逗号分隔多个值。
         </div>
-        <div class="grid">
+        <div class="grid grid--2">
           <div>
             <div class="label">SEARCH_KEYWORD（关键词）</div>
             <div class="help">例如：后端开发, Python, AI Agent</div>
@@ -193,7 +111,7 @@
             <input id="fMaxSalary" type="number" min="0" step="1" placeholder="100" />
           </div>
         </div>
-        <div class="row">
+        <div class="fieldSplit">
           <div>
             <div class="label">补充说明（可选）</div>
             <div class="help">例如：经验年限、技术栈、管理经验、英语能力等</div>
@@ -201,11 +119,11 @@
           <textarea id="fExtra" placeholder="我有 5 年 Python 后端经验…"></textarea>
         </div>
         <div class="actions">
-          <button id="btnFormSubmit">生成文本并匹配场景</button>
-          <button class="secondary" id="btnFormShowText">预览生成文本</button>
+          <button type="button" id="btnFormSubmit">生成文本并匹配场景</button>
+          <button type="button" class="secondary" id="btnFormShowText">预览生成文本</button>
           <span id="statusForm" class="status"></span>
         </div>
-        <pre id="resultForm" class="mono"></pre>
+        <pre id="resultForm" class="mono small"></pre>
       </div>
     </div>
 
@@ -217,7 +135,15 @@
         document.getElementById("panel-form").style.display = tab === "form" ? "" : "none";
       }
 
-      document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setTab(t.dataset.tab)));
+      document.querySelectorAll(".tab").forEach((t) => {
+        t.addEventListener("click", () => setTab(t.dataset.tab));
+        t.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter" || ev.key === " ") {
+            ev.preventDefault();
+            setTab(t.dataset.tab);
+          }
+        });
+      });
 
       function setStatus(id, msg, kind) {
         const el = document.getElementById(id);
@@ -236,8 +162,10 @@
         });
         const t = await r.text();
         let j = null;
-        try { j = JSON.parse(t); } catch (_) {}
-        if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+        try {
+          j = JSON.parse(t);
+        } catch (_) {}
+        if (!r.ok) throw new Error(j?.detail || j?.msg || t || "HTTP " + r.status);
         return j;
       }
 
@@ -271,8 +199,10 @@
           const r = await fetch("/api/start_from_upload", { method: "POST", body: fd });
           const t = await r.text();
           let j = null;
-          try { j = JSON.parse(t); } catch (_) {}
-          if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+          try {
+            j = JSON.parse(t);
+          } catch (_) {}
+          if (!r.ok) throw new Error(j?.detail || j?.msg || t || "HTTP " + r.status);
           if (j?.code && j.code !== 200) throw new Error(j?.msg || "业务失败");
           setStatus("statusUpload", "完成：scene_id=" + j.scene_id, "ok");
           showResult("resultUpload", j);
@@ -336,4 +266,3 @@
     </script>
   </body>
 </html>
-

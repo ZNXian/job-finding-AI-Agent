@@ -4,93 +4,88 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>场景列表</title>
+    <link rel="stylesheet" href="/static/css/common.css" />
     <style>
-      :root {
-        --bg: #0b0f19;
-        --panel: #121a2a;
-        --text: #e7eefc;
-        --muted: #a9b6d3;
-        --border: #24324d;
-        --accent: #5aa7ff;
-        --danger: #ff6b6b;
-        --ok: #39d98a;
+      .sceneCard {
+        position: relative;
+        overflow: hidden;
       }
-      body {
-        margin: 0;
-        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "PingFang SC",
-          "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
-        background: radial-gradient(1200px 600px at 20% 0%, #132449 0%, var(--bg) 60%);
-        color: var(--text);
+      .sceneCard::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 3px;
+        background: linear-gradient(180deg, var(--accent), rgba(57, 217, 138, 0.6));
+        opacity: 0.85;
       }
-      .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 18px 60px; }
-      .header { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
-      .title { font-size: 22px; font-weight: 800; }
-      .subtitle { color: var(--muted); font-size: 13px; }
-      .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; align-items: center; }
-      button {
-        background: linear-gradient(180deg, rgba(90,167,255,1) 0%, rgba(49,122,240,1) 100%);
-        border: none;
-        color: white;
-        padding: 10px 12px;
-        border-radius: 12px;
-        font-weight: 800;
-        cursor: pointer;
-        font-size: 13px;
-      }
-      button.secondary {
-        background: rgba(9, 13, 22, 0.6);
-        border: 1px solid rgba(36,50,77,0.9);
-        color: var(--text);
-        font-weight: 700;
-      }
-      .status { font-size: 13px; color: var(--muted); }
-      .status.ok { color: var(--ok); }
-      .status.err { color: var(--danger); }
-      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
-      @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
-      .card {
-        background: rgba(18, 26, 42, 0.92);
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        padding: 14px;
-      }
-      .cardTop { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
-      .sid { font-size: 16px; font-weight: 900; }
-      .pill {
-        display: inline-flex;
-        gap: 8px;
+      .sceneMeta {
+        display: flex;
         align-items: center;
-        padding: 8px 10px;
-        border-radius: 999px;
-        border: 1px solid rgba(36,50,77,0.9);
-        background: rgba(9, 13, 22, 0.65);
-        color: var(--muted);
-        font-size: 12px;
-        cursor: pointer;
-        user-select: none;
-        white-space: nowrap;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 8px;
       }
-      .pill:hover { border-color: rgba(90,167,255,0.7); color: var(--text); }
-      .kv { margin-top: 10px; display: grid; grid-template-columns: 110px 1fr; gap: 6px 10px; font-size: 13px; }
-      .k { color: var(--muted); }
-      .v { white-space: pre-wrap; }
-      code { color: #cfe0ff; }
-      a { color: var(--accent); text-decoration: none; }
+      .badge {
+        font-size: 11px;
+        font-weight: 800;
+        padding: 4px 8px;
+        border-radius: var(--radius-pill);
+        border: 1px solid rgba(36, 50, 77, 0.9);
+        background: rgba(9, 13, 22, 0.55);
+        color: var(--muted);
+      }
+      .badge--on {
+        border-color: rgba(57, 217, 138, 0.45);
+        color: var(--ok);
+        background: rgba(57, 217, 138, 0.1);
+      }
+      .pill--copied {
+        animation: fadeInUp 0.35s var(--ease-out);
+        border-color: var(--ok) !important;
+        color: var(--ok) !important;
+      }
     </style>
   </head>
-  <body>
+  <body class="page-enter">
     <div class="wrap">
       <div class="header">
-        <div class="title">场景列表</div>
-        <div class="subtitle">仅展示结构化条目（不包含简历全文）</div>
+        <div class="header-main">
+          <div class="iconTitle" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="7" height="7" rx="1" />
+              <rect x="14" y="3" width="7" height="7" rx="1" />
+              <rect x="3" y="14" width="7" height="7" rx="1" />
+              <rect x="14" y="14" width="7" height="7" rx="1" />
+            </svg>
+          </div>
+          <div>
+            <div class="title">场景列表</div>
+            <div class="subtitle">仅展示结构化条目（不包含简历全文）</div>
+          </div>
+        </div>
       </div>
       <div class="actions">
-        <button id="btnRefresh">刷新</button>
-        <button class="secondary" id="btnToCreate">去创建页</button>
+        <button type="button" id="btnRefresh">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M23 4v6h-6M1 20v-6h6" />
+            <path d="M3.51 9a9 9 0 0114.13-3.36L23 10M1 14l5.36 4.36A9 9 0 0020.49 15" />
+          </svg>
+          刷新
+        </button>
+        <button type="button" class="secondary" id="btnToCreate">去创建页</button>
+        <a class="pill" href="/workspace">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+            <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+            <path d="M9 22V12h6v10" />
+          </svg>
+          工作台
+        </a>
         <span id="status" class="status"></span>
       </div>
 
-      <div id="grid" class="grid"></div>
+      <div id="grid" class="grid grid--cards"></div>
     </div>
 
     <script>
@@ -111,15 +106,30 @@
         const r = await fetch("/api/scenes/list");
         const t = await r.text();
         let j = null;
-        try { j = JSON.parse(t); } catch (_) {}
-        if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+        try {
+          j = JSON.parse(t);
+        } catch (_) {}
+        if (!r.ok) throw new Error(j?.detail || j?.msg || t || "HTTP " + r.status);
         if (j?.code && j.code !== 200) throw new Error(j?.msg || "业务失败");
         return j?.scenes || [];
       }
 
+      function renderEmpty(grid) {
+        grid.innerHTML = "";
+        const wrap = document.createElement("div");
+        wrap.className = "card";
+        wrap.innerHTML =
+          '<div class="emptyState">' +
+          '<div class="emptyState__icon" aria-hidden="true"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg></div>' +
+          "<div><strong>暂无场景</strong></div>" +
+          '<div class="mt-2">去创建页新增一个求职场景，或从 <a href="/workspace">工作台</a> 进入。</div>' +
+          "</div>";
+        grid.appendChild(wrap);
+      }
+
       function card(scene) {
         const c = document.createElement("div");
-        c.className = "card";
+        c.className = "card sceneCard";
 
         const top = document.createElement("div");
         top.className = "cardTop";
@@ -130,19 +140,45 @@
 
         const copy = document.createElement("div");
         copy.className = "pill";
-        copy.textContent = "复制 scene_id";
-        copy.addEventListener("click", async () => {
+        copy.setAttribute("role", "button");
+        copy.tabIndex = 0;
+        copy.innerHTML =
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> 复制 scene_id';
+        copy.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
           try {
             await navigator.clipboard.writeText(String(scene.scene_id));
             setStatus("已复制 scene_id=" + scene.scene_id, "ok");
+            copy.classList.add("pill--copied");
+            copy.innerHTML =
+              '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M20 6L9 17l-5-5"/></svg> 已复制';
+            window.setTimeout(() => {
+              copy.classList.remove("pill--copied");
+              copy.innerHTML =
+                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> 复制 scene_id';
+            }, 1600);
           } catch (e) {
             setStatus("复制失败（浏览器权限限制）", "err");
+          }
+        });
+        copy.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter" || ev.key === " ") {
+            ev.preventDefault();
+            copy.click();
           }
         });
 
         top.appendChild(sid);
         top.appendChild(copy);
         c.appendChild(top);
+
+        const meta = document.createElement("div");
+        meta.className = "sceneMeta";
+        const b1 = document.createElement("span");
+        b1.className = "badge" + (scene.accept_remote ? " badge--on" : "");
+        b1.textContent = scene.accept_remote ? "接受远程" : "现场优先";
+        meta.appendChild(b1);
+        c.appendChild(meta);
 
         const kv = document.createElement("div");
         kv.className = "kv";
@@ -160,12 +196,22 @@
         add("keywords", text(scene.search_keywords));
         add("city", text(scene.city));
         add("province", text(scene.province || ""));
-        add("remote", String(!!scene.accept_remote));
         add("salary(K)", String(scene.min_salary ?? "") + "–" + String(scene.max_salary ?? ""));
         add("requirements", Array.isArray(scene.requirements) ? scene.requirements.map((x) => "- " + x).join("\n") : text(scene.requirements));
         add("update_time", text(scene.update_time || ""));
 
         c.appendChild(kv);
+
+        const foot = document.createElement("div");
+        foot.className = "actions";
+        foot.style.marginTop = "12px";
+        const go = document.createElement("a");
+        go.className = "pill";
+        go.href = "/workspace/scene/" + encodeURIComponent(String(scene.scene_id));
+        go.textContent = "打开场景详情 →";
+        foot.appendChild(go);
+        c.appendChild(foot);
+
         return c;
       }
 
@@ -175,11 +221,8 @@
         try {
           const scenes = await loadScenes();
           if (!scenes.length) {
-            setStatus("暂无场景。去创建页新增一个。", "ok");
-            const empty = document.createElement("div");
-            empty.className = "card";
-            empty.innerHTML = '暂无场景。<a href=\"/scenes\">去创建页</a>。';
-            grid.appendChild(empty);
+            setStatus("暂无场景", "ok");
+            renderEmpty(grid);
             return;
           }
           scenes.forEach((s) => grid.appendChild(card(s)));
@@ -195,4 +238,3 @@
     </script>
   </body>
 </html>
-

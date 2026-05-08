@@ -4,138 +4,84 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>工作台</title>
+    <link rel="stylesheet" href="/static/css/common.css" />
     <style>
-      :root {
-        --bg: #0b0f19;
-        --panel: #121a2a;
-        --text: #e7eefc;
-        --muted: #a9b6d3;
-        --border: #24324d;
-        --accent: #5aa7ff;
-        --danger: #ff6b6b;
-        --ok: #39d98a;
+      .topbarBrand {
+        display: flex;
+        gap: 12px;
+        align-items: center;
       }
-      body {
-        margin: 0;
-        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "PingFang SC",
-          "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
-        background: radial-gradient(1200px 600px at 20% 0%, #132449 0%, var(--bg) 60%);
-        color: var(--text);
+      .topbarBrand .iconTitle {
+        width: 40px;
+        height: 40px;
       }
-      .topbar {
-        position: sticky;
-        top: 0;
-        background: rgba(11, 15, 25, 0.85);
-        backdrop-filter: blur(10px);
-        border-bottom: 1px solid rgba(36,50,77,0.6);
-        z-index: 10;
+      .topbarBrand .iconTitle svg {
+        width: 20px;
+        height: 20px;
       }
-      .topbarInner {
-        max-width: 1400px;
-        margin: 0 auto;
-        padding: 12px 14px;
+      .toolbar {
         display: flex;
         gap: 10px;
         align-items: center;
-        justify-content: space-between;
+        flex-wrap: wrap;
       }
-      .brand { font-weight: 900; }
-      .muted { color: var(--muted); font-size: 12px; }
-      .wrap { max-width: 1400px; margin: 0 auto; padding: 14px; }
-      .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      .panel { background: rgba(18, 26, 42, 0.92); border: 1px solid var(--border); border-radius: 14px; padding: 14px; overflow: hidden; }
-      .panelHeader { display:flex; gap:10px; align-items:center; justify-content:space-between; }
-      .h { font-size: 15px; font-weight: 900; }
-      .pill {
-        display: inline-flex;
-        gap: 8px;
-        align-items: center;
-        padding: 8px 10px;
-        border-radius: 999px;
-        border: 1px solid rgba(36,50,77,0.9);
-        background: rgba(9, 13, 22, 0.65);
-        color: var(--muted);
-        font-size: 12px;
-        cursor: pointer;
-        user-select: none;
-        white-space: nowrap;
+      .tag {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 800;
+        padding: 3px 8px;
+        border-radius: var(--radius-pill);
+        background: rgba(90, 167, 255, 0.12);
+        border: 1px solid rgba(90, 167, 255, 0.35);
+        color: var(--accent);
+        margin-right: 6px;
       }
-      .pill:hover { border-color: rgba(90,167,255,0.7); color: var(--text); }
-      textarea {
-        width: 100%;
-        min-height: 180px;
-        resize: vertical;
-        background: rgba(9, 13, 22, 0.85);
-        border: 1px solid rgba(36,50,77,0.9);
-        color: var(--text);
-        padding: 12px;
-        border-radius: 12px;
-        outline: none;
-        font-size: 13px;
-        line-height: 1.5;
-        box-sizing: border-box;
-      }
-      input[type="text"], input[type="number"] {
-        width: 100%;
-        background: rgba(9, 13, 22, 0.85);
-        border: 1px solid rgba(36,50,77,0.9);
-        color: var(--text);
-        padding: 10px 10px;
-        border-radius: 10px;
-        outline: none;
-        font-size: 13px;
-        box-sizing: border-box;
-      }
-      .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; align-items:center; }
-      button {
-        background: linear-gradient(180deg, rgba(90,167,255,1) 0%, rgba(49,122,240,1) 100%);
-        border: none;
-        color: white;
-        padding: 10px 12px;
-        border-radius: 12px;
-        font-weight: 900;
-        cursor: pointer;
-        font-size: 13px;
-      }
-      button.secondary { background: rgba(9,13,22,0.6); border: 1px solid rgba(36,50,77,0.9); color: var(--text); }
-      .status { font-size: 13px; color: var(--muted); }
-      .status.ok { color: var(--ok); }
-      .status.err { color: var(--danger); }
-      .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-      @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } .grid2 { grid-template-columns: 1fr; } }
-      .cards { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-top: 10px; }
-      @media (max-width: 980px) { .cards { grid-template-columns: 1fr; } }
-      .card { border: 1px solid rgba(36,50,77,0.7); border-radius: 12px; padding: 12px; background: rgba(9,13,22,0.35); cursor:pointer; }
-      .card:hover { border-color: rgba(90,167,255,0.7); }
-      .sid { font-weight: 900; }
-      .small { font-size: 12px; color: var(--muted); margin-top: 6px; white-space: pre-wrap; }
-      a { color: var(--accent); text-decoration: none; }
     </style>
   </head>
   <body>
-    <div class="topbar">
+    <div class="topbar page-enter">
       <div class="topbarInner">
-        <div>
-          <div class="brand">工作台</div>
-          <div class="muted">左侧创建/匹配场景，右侧选择已有场景进入详情</div>
+        <div class="topbarBrand">
+          <div class="iconTitle" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <path d="M3 9h18M9 21V9" />
+            </svg>
+          </div>
+          <div>
+            <div class="brand">工作台</div>
+            <div class="muted">左侧创建/匹配场景，右侧选择已有场景进入详情</div>
+          </div>
         </div>
-        <div style="display:flex; gap:10px; align-items:center;">
-          <button id="btnRunAll">手动执行一次agent运行所有场景卡</button>
-          <a class="pill" href="/">返回首页</a>
+        <div class="toolbar">
+          <button type="button" id="btnRunAll">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
+            手动执行一次 agent（全部场景）
+          </button>
+          <a class="pill" href="/">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+            </svg>
+            返回首页
+          </a>
         </div>
       </div>
     </div>
 
-    <div class="wrap">
-      <div id="layout" class="layout">
+    <div class="wrap wrap--wide">
+      <div id="layout" class="layout layout--2">
         <div class="panel" id="leftPanel">
           <div class="panelHeader">
-            <div class="h">输入场景内容（匹配或新建）</div>
-            <span class="pill" id="btnToList">打开列表页</span>
+            <div class="h">
+              <span class="tag">新建</span>输入场景内容（匹配或新建）
+            </div>
+            <span class="pill" id="btnToList" role="button" tabindex="0">列表页</span>
           </div>
 
-          <div class="muted" style="margin-top:10px;">按默认字段填表（唯一生成入口，可先自动识别回填再编辑）</div>
-          <div class="grid2" style="margin-top:10px;">
+          <div class="muted mt-3">按默认字段填表（唯一生成入口，可先自动识别回填再编辑）</div>
+          <div class="grid2 mt-3">
             <div>
               <div class="muted">关键词 SEARCH_KEYWORD</div>
               <input id="fKws" type="text" placeholder="后端开发, Python" />
@@ -146,12 +92,12 @@
             </div>
             <div>
               <div class="muted">远程 ACCEPT_REMOTE</div>
-              <div style="display:flex; gap:12px; align-items:center; margin-top:6px; flex-wrap:wrap;">
-                <label style="display:flex; gap:8px; align-items:center; cursor:pointer; color: var(--text); font-size: 13px;">
+              <div class="radioRow">
+                <label>
                   <input type="radio" name="acceptRemote" id="fRemoteYes" value="true" />
                   接受远程工作
                 </label>
-                <label style="display:flex; gap:8px; align-items:center; cursor:pointer; color: var(--text); font-size: 13px;">
+                <label>
                   <input type="radio" name="acceptRemote" id="fRemoteNo" value="false" checked />
                   不接受远程工作
                 </label>
@@ -165,51 +111,61 @@
               </div>
             </div>
           </div>
-          <div class="muted" style="margin-top:10px;">补充说明（可选）</div>
+          <div class="muted mt-3">补充说明（可选）</div>
           <textarea id="fExtra" placeholder="补充：经验年限/技术栈/管理经验/项目亮点…"></textarea>
           <div class="actions">
-            <button id="btnForm">生成并匹配</button>
-            <button class="secondary" id="btnFormPreview">预览</button>
+            <button type="button" id="btnForm">生成并匹配</button>
+            <button type="button" class="secondary" id="btnFormPreview">预览</button>
             <span id="statusForm" class="status"></span>
           </div>
-          <pre id="resultForm" class="small"></pre>
+          <pre id="resultForm" class="small mono"></pre>
 
-          <hr style="border:none;border-top:1px solid rgba(36,50,77,0.6); margin:14px 0;" />
+          <hr class="divider" />
 
           <div class="muted">粘贴文本（自动识别 → 回填上方表单）</div>
-          <textarea id="pasteText" placeholder="粘贴：求职意向/城市薪资/技能经历…"></textarea>
+          <textarea id="pasteText" class="mt-2" placeholder="粘贴：求职意向/城市薪资/技能经历…"></textarea>
           <div class="actions">
-            <button id="btnPaste">自动识别</button>
-            <button class="secondary" id="btnPasteClear">清空</button>
+            <button type="button" id="btnPaste">自动识别</button>
+            <button type="button" class="secondary" id="btnPasteClear">清空</button>
             <span id="statusPaste" class="status"></span>
           </div>
-          <pre id="resultPaste" class="small"></pre>
+          <pre id="resultPaste" class="small mono"></pre>
 
-          <hr style="border:none;border-top:1px solid rgba(36,50,77,0.6); margin:14px 0;" />
+          <hr class="divider" />
 
           <div class="muted">上传 txt/md（自动识别 → 回填上方表单）</div>
-          <input id="uploadFile" type="file" accept=".txt,.md,text/plain,text/markdown" />
+          <div class="fileRow mt-2">
+            <input id="uploadFile" type="file" accept=".txt,.md,text/plain,text/markdown" />
+          </div>
           <div class="actions">
-            <button id="btnUpload">上传并自动识别</button>
+            <button type="button" id="btnUpload">上传并自动识别</button>
             <span id="statusUpload" class="status"></span>
           </div>
-          <pre id="resultUpload" class="small"></pre>
+          <pre id="resultUpload" class="small mono"></pre>
         </div>
 
         <div class="panel" id="rightPanel">
           <div class="panelHeader">
-            <div class="h">已有场景（点击进入）</div>
-            <span class="pill" id="btnRefresh">刷新</span>
+            <div class="h">
+              <span class="tag" style="background: rgba(57, 217, 138, 0.12); border-color: rgba(57, 217, 138, 0.4); color: var(--ok)">已有</span>
+              场景（点击进入）
+            </div>
+            <span class="pill" id="btnRefresh" role="button" tabindex="0">刷新</span>
           </div>
-          <div id="statusScenes" class="status" style="margin-top:10px;"></div>
+          <div id="statusScenes" class="status mt-3"></div>
           <div id="cards" class="cards"></div>
         </div>
       </div>
     </div>
 
     <script>
-      const layout = document.getElementById("layout");
       document.getElementById("btnToList").addEventListener("click", () => (location.href = "/scenes/list"));
+      document.getElementById("btnToList").addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          location.href = "/scenes/list";
+        }
+      });
 
       function setStatus(id, msg, kind) {
         const el = document.getElementById(id);
@@ -222,28 +178,44 @@
       async function postJson(url, body) {
         const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const t = await r.text();
-        let j = null; try { j = JSON.parse(t); } catch (_) {}
-        if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+        let j = null;
+        try {
+          j = JSON.parse(t);
+        } catch (_) {}
+        if (!r.ok) throw new Error(j?.detail || j?.msg || t || "HTTP " + r.status);
         return j;
       }
-      function csvSplit(s) { return (s||"").split(/[，,]/).map(x=>x.trim()).filter(Boolean); }
+      function csvSplit(s) {
+        return (s || "")
+          .split(/[，,]/)
+          .map((x) => x.trim())
+          .filter(Boolean);
+      }
 
       function setFormFieldsFromRecognized(data) {
         const d = data || {};
-        const kws = Array.isArray(d.search_keywords) ? d.search_keywords : (d.search_keywords ? [String(d.search_keywords)] : []);
+        const kws = Array.isArray(d.search_keywords) ? d.search_keywords : d.search_keywords ? [String(d.search_keywords)] : [];
         const cityVal = d.city;
-        const cities = Array.isArray(cityVal) ? cityVal : (cityVal ? [String(cityVal)] : []);
-        document.getElementById("fKws").value = kws.map(x => String(x).trim()).filter(Boolean).join(", ");
-        document.getElementById("fCities").value = cities.map(x => String(x).trim()).filter(Boolean).join(", ");
+        const cities = Array.isArray(cityVal) ? cityVal : cityVal ? [String(cityVal)] : [];
+        document.getElementById("fKws").value = kws
+          .map((x) => String(x).trim())
+          .filter(Boolean)
+          .join(", ");
+        document.getElementById("fCities").value = cities
+          .map((x) => String(x).trim())
+          .filter(Boolean)
+          .join(", ");
         const ar = !!d.accept_remote;
         document.getElementById("fRemoteYes").checked = ar;
         document.getElementById("fRemoteNo").checked = !ar;
         if (d.min_salary !== undefined && d.min_salary !== null) document.getElementById("fMin").value = String(d.min_salary);
         if (d.max_salary !== undefined && d.max_salary !== null) document.getElementById("fMax").value = String(d.max_salary);
-        const req = Array.isArray(d.requirements) ? d.requirements : (d.requirements ? [String(d.requirements)] : []);
-        // 回填到“补充说明”里，用户可继续编辑；保留原内容则可自行修改
-        document.getElementById("fExtra").value = req.map(x => String(x).trim()).filter(Boolean).join("\\n");
-        setStatus("statusForm", "已自动识别并回填，可编辑后点击“生成并匹配”创建场景", "ok");
+        const req = Array.isArray(d.requirements) ? d.requirements : d.requirements ? [String(d.requirements)] : [];
+        document.getElementById("fExtra").value = req
+          .map((x) => String(x).trim())
+          .filter(Boolean)
+          .join("\\n");
+        setStatus("statusForm", "已自动识别并回填，可编辑后点击「生成并匹配」创建场景", "ok");
       }
       function buildText() {
         const kws = csvSplit(document.getElementById("fKws").value);
@@ -258,9 +230,13 @@
         if (kws.length) lines.push("关键词：" + kws.join("、"));
         if (cities.length) lines.push("城市：" + cities.join("、"));
         if (remote) lines.push("接受远程：" + remote);
-        if (minS || maxS) lines.push("期望薪资（K/月）：" + (minS||"?") + "–" + (maxS||"?"));
+        if (minS || maxS) lines.push("期望薪资（K/月）：" + (minS || "?") + "–" + (maxS || "?"));
         lines.push("");
-        if (extra) { lines.push("补充说明："); lines.push(extra); lines.push(""); }
+        if (extra) {
+          lines.push("补充说明：");
+          lines.push(extra);
+          lines.push("");
+        }
         lines.push("请输出结构化求职场景并判断复用或新建。");
         return lines.join("\\n");
       }
@@ -327,30 +303,52 @@
         try {
           const r = await fetch("/api/scenes/list");
           const t = await r.text();
-          let j = null; try { j = JSON.parse(t); } catch (_) {}
-          if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+          let j = null;
+          try {
+            j = JSON.parse(t);
+          } catch (_) {}
+          if (!r.ok) throw new Error(j?.detail || j?.msg || t || "HTTP " + r.status);
           const scenes = j.scenes || [];
           if (!scenes.length) {
             status.textContent = "暂无场景，请在左侧创建。";
+            const empty = document.createElement("div");
+            empty.className = "card card--tile";
+            empty.innerHTML =
+              '<div class="emptyState" style="padding: 8px 12px 16px">' +
+              '<div class="emptyState__icon" style="width:48px;height:48px;margin-bottom:10px"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg></div>' +
+              '<div class="muted">填写左侧表单并点击「生成并匹配」即可创建第一个场景。</div>' +
+              "</div>";
+            cards.appendChild(empty);
             return;
           }
           status.textContent = "共 " + scenes.length + " 个场景";
           scenes.forEach((s) => {
             const div = document.createElement("div");
-            div.className = "card";
+            div.className = "card card--clickable card--tile";
+            const remote = !!s.accept_remote;
             div.innerHTML =
-              '<div class="sid">scene_id=' + s.scene_id + "</div>" +
+              '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">' +
+              '<div class="sid">scene_id=' +
+              s.scene_id +
+              "</div>" +
+              '<span class="badge" style="font-size:11px;font-weight:800;padding:4px 8px;border-radius:999px;border:1px solid rgba(36,50,77,0.9);background:rgba(9,13,22,0.55);color:' +
+              (remote ? "var(--ok)" : "var(--muted)") +
+              '">' +
+              (remote ? "远程" : "现场") +
+              "</span></div>" +
               '<div class="small">keywords: ' +
               (Array.isArray(s.search_keywords) ? s.search_keywords.join("、") : s.search_keywords || "") +
               "</div>" +
               '<div class="small">city: ' +
               (Array.isArray(s.city) ? s.city.join("、") : s.city || "") +
-              " | salary: " +
+              " · salary: " +
               s.min_salary +
               "–" +
               s.max_salary +
               "K</div>" +
-              '<div class="small">update: ' + (s.update_time || "") + "</div>";
+              '<div class="small">update: ' +
+              (s.update_time || "") +
+              "</div>";
             div.addEventListener("click", () => (location.href = "/workspace/scene/" + s.scene_id));
             cards.appendChild(div);
           });
@@ -360,17 +358,27 @@
       }
 
       document.getElementById("btnRefresh").addEventListener("click", refreshScenes);
+      document.getElementById("btnRefresh").addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          refreshScenes();
+        }
+      });
       refreshScenes();
 
-      // 单线程依次执行所有 scene（更新时间新优先），每个 scene 等任务完成后再执行下一个
       let _runAllBusy = false;
-      async function _sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+      async function _sleep(ms) {
+        return new Promise((r) => setTimeout(r, ms));
+      }
 
       async function _postRunAsync(sceneId) {
         const r = await fetch("/api/agent/run_async?scene_id=" + encodeURIComponent(sceneId), { method: "POST" });
         const t = await r.text();
-        let j = null; try { j = JSON.parse(t); } catch (_) {}
-        if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+        let j = null;
+        try {
+          j = JSON.parse(t);
+        } catch (_) {}
+        if (!r.ok) throw new Error(j?.detail || j?.msg || t || "HTTP " + r.status);
         if (j?.code && j.code !== 200) throw new Error(j?.msg || "业务失败");
         return j.task_id;
       }
@@ -378,26 +386,34 @@
       async function _getTask(taskId) {
         const r = await fetch("/api/agent/task/" + encodeURIComponent(taskId));
         const t = await r.text();
-        let j = null; try { j = JSON.parse(t); } catch (_) {}
-        if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+        let j = null;
+        try {
+          j = JSON.parse(t);
+        } catch (_) {}
+        if (!r.ok) throw new Error(j?.detail || j?.msg || t || "HTTP " + r.status);
         if (j?.code && j.code !== 200) throw new Error(j?.msg || "业务失败");
         return j;
       }
 
-      function _sceneUpdateKey(s) { return String(s?.update_time || ""); }
+      function _sceneUpdateKey(s) {
+        return String(s?.update_time || "");
+      }
 
       async function runAllScenesOnce() {
         if (_runAllBusy) return;
         _runAllBusy = true;
         const btn = document.getElementById("btnRunAll");
-        const prevText = btn.textContent;
-        btn.textContent = "运行中…";
+        const prevHTML = btn.innerHTML;
+        btn.innerHTML = "运行中…";
         btn.disabled = true;
         try {
           const r = await fetch("/api/scenes/list");
           const t = await r.text();
-          let j = null; try { j = JSON.parse(t); } catch (_) {}
-          if (!r.ok) throw new Error(j?.detail || j?.msg || t || ("HTTP " + r.status));
+          let j = null;
+          try {
+            j = JSON.parse(t);
+          } catch (_) {}
+          if (!r.ok) throw new Error(j?.detail || j?.msg || t || "HTTP " + r.status);
           const scenes = (j.scenes || []).slice().sort((a, b) => _sceneUpdateKey(b).localeCompare(_sceneUpdateKey(a)));
           if (!scenes.length) {
             alert("暂无场景可运行");
@@ -413,7 +429,6 @@
               console.error(e);
               continue;
             }
-            // 轮询等待该任务完成
             while (true) {
               await _sleep(2000);
               let st;
@@ -423,14 +438,14 @@
                 console.error(e);
                 break;
               }
-              const status = st.status || "unknown";
-              if (status === "success" || status === "error") break;
+              const stName = st.status || "unknown";
+              if (stName === "success" || stName === "error") break;
             }
           }
-          btn.textContent = "已完成（刷新岗位请进场景详情页）";
+          btn.textContent = "已完成（进场景详情刷新岗位）";
           await _sleep(1200);
         } finally {
-          btn.textContent = prevText;
+          btn.innerHTML = prevHTML;
           btn.disabled = false;
           _runAllBusy = false;
         }
@@ -440,4 +455,3 @@
     </script>
   </body>
 </html>
-
